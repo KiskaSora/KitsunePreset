@@ -775,19 +775,42 @@ function kpCreateSidebar() {
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-          <p style="font-size:11px;opacity:.4;text-align:center;font-style:italic;margin:4px 0 10px">
+
+          <!-- Hint: main controls are in the floating pill -->
+          <p style="font-size:11px;opacity:.4;text-align:center;font-style:italic;margin:4px 0 8px">
             Управление — в плавающей плашке
           </p>
+
+          <!-- Restore / Debug buttons -->
+          <div style="display:flex;gap:5px;margin-bottom:10px">
+            <button id="kp-sb-restore"
+              style="flex:1;background:rgba(167,139,250,.08);border:1px solid rgba(167,139,250,.22);border-radius:6px;
+                     color:rgba(196,181,253,.8);font-size:11px;padding:5px 4px;cursor:pointer;line-height:1.3">
+              🪟 Восстановить окно
+            </button>
+            <button id="kp-sb-reload"
+              style="flex:1;background:rgba(167,139,250,.05);border:1px solid rgba(167,139,250,.15);border-radius:6px;
+                     color:rgba(196,181,253,.6);font-size:11px;padding:5px 4px;cursor:pointer;line-height:1.3">
+              ⟳ Перезапустить
+            </button>
+          </div>
+
+          <!-- Mass assignment section -->
           <div style="font-size:9.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;opacity:.45;margin-bottom:6px">
             Массовое назначение персонажам
           </div>
-          <input type="text" id="kp-sb-srch" placeholder="🔍 Поиск..."
-            style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:6px;color:#ddd;font-size:12px;padding:5px 8px;margin-bottom:5px">
+          <input type="text" id="kp-sb-srch" placeholder="🔍 Поиск по имени..."
+            style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);
+                   border-radius:6px;color:#ddd;font-size:12px;padding:5px 8px;margin-bottom:5px">
           <div id="kp-sb-list" style="max-height:240px;overflow-y:auto"></div>
+
+          <!-- Danger zone -->
           <button id="kp-sb-clr"
-            style="margin-top:8px;width:100%;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.2);border-radius:6px;color:rgba(252,165,165,.7);font-size:11px;padding:5px;cursor:pointer">
+            style="margin-top:8px;width:100%;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.2);
+                   border-radius:6px;color:rgba(252,165,165,.7);font-size:11px;padding:5px;cursor:pointer">
             🗑 Удалить все привязки
           </button>
+
         </div>
       </div>
     </div>`);
@@ -806,13 +829,99 @@ function kpCreateSidebar() {
         KPS.presetBindings = {}; KPS.bindingMeta = {};
         kpSave(); kpRenderSidebar(); kpRenderPanel(); kpRefreshPill();
     });
+
+    // Restore floating window to default position
+    jQuery('#kp-sb-restore').on('click', function() {
+        KPS.docked    = false;
+        KPS.panelPos  = { x: null, y: null };
+        KPS.pillPos   = { corner: 'top-right', x: null, y: null };
+        kpSave();
+        // Re-attach panel to body and reset position
+        const panel = document.getElementById('kp-float');
+        if (panel) {
+            document.body.appendChild(panel);
+            jQuery('#kp-float')
+                .removeClass('kp-docked kp-open')
+                .css({ top: '80px', right: '12px', left: 'auto', bottom: 'auto' });
+        }
+        kpCreatePill();
+        kpRenderPanel();
+        kpRefreshPill();
+        kpToast('Окно восстановлено');
+    });
+
+    // Soft reload: destroy & re-init everything
+    jQuery('#kp-sb-reload').on('click', function() {
+        jQuery('#kp-pill, #kp-float').remove();
+        kpObs?.disconnect(); kpObs = null;
+        kpInit();
+        kpToast('KitsunePreset перезапущен');
+    });
 }
 
 function kpRenderSidebar() {
     const chars = window.characters || [];
     const el = jQuery('#kp-sb-list').empty();
     if (!chars.length) {
-        el.html('<div style="font-size:11px;opacity:.35;padding:4px">Нет персонажей</div>');
+        el.html(`
+            <div style="
+                background:rgba(167,139,250,.05);
+                border:1px solid rgba(167,139,250,.15);
+                border-radius:8px;
+                padding:10px 11px;
+                margin:2px 0 4px;
+                font-size:11px;
+                line-height:1.65;
+                color:rgba(196,181,253,.7)
+            ">
+                <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+                            color:rgba(167,139,250,.6);margin-bottom:7px">
+                    📖 Быстрый старт
+                </div>
+
+                <div style="margin-bottom:6px">
+                    <span style="color:rgba(196,181,253,.9);font-weight:600">① Открыть плашку</span><br>
+                    Нажми на плавающую иконку в углу экрана (перетаскивается).
+                </div>
+
+                <div style="margin-bottom:6px">
+                    <span style="color:rgba(196,181,253,.9);font-weight:600">② Выбрать пресет</span><br>
+                    Дропдаун <b style="color:#a78bfa">✦ Пресет</b> — выбор активного пресета вручную.
+                </div>
+
+                <div style="margin-bottom:6px">
+                    <span style="color:rgba(196,181,253,.9);font-weight:600">③ Привязать к персонажу</span><br>
+                    Открой чат с персонажем → выбери пресет → нажми
+                    <b style="color:#a78bfa">👤 К персонажу</b>.
+                    При следующем входе в этот чат пресет применится сам.
+                </div>
+
+                <div style="margin-bottom:6px">
+                    <span style="color:rgba(196,181,253,.9);font-weight:600">④ Привязать к чату</span><br>
+                    Кнопка <b style="color:#a78bfa">💬 К чату</b> — привязка только к конкретному
+                    чату (приоритет выше, чем у персонажа).
+                </div>
+
+                <div style="margin-bottom:8px">
+                    <span style="color:rgba(196,181,253,.9);font-weight:600">⑤ Авто-смена</span><br>
+                    В ⚙ настройках включи <b>Авто-смена при переходе</b> — пресет будет
+                    меняться автоматически при смене чата.
+                </div>
+
+                <div style="
+                    border-top:1px solid rgba(167,139,250,.12);
+                    padding-top:7px;
+                    font-size:10px;
+                    color:rgba(196,181,253,.45)
+                ">
+                    <b style="color:rgba(196,181,253,.6)">🔧 Отладка</b><br>
+                    Плашка пропала → <b>Восстановить окно</b> выше.<br>
+                    Пресет не применяется → проверь <b>Авто-смена</b> и <b>Включено</b> в ⚙.<br>
+                    Что-то сломалось → нажми <b>⟳ Перезапустить</b>.<br>
+                    Консоль браузера: фильтр <code style="color:#a78bfa">[✦KP]</code> для логов.
+                </div>
+            </div>
+        `);
         return;
     }
     chars.forEach((c, i) => {
