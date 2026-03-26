@@ -795,14 +795,52 @@ function kpCreateSidebar() {
             </button>
           </div>
 
-          <!-- Mass assignment section -->
-          <div style="font-size:9.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;opacity:.45;margin-bottom:6px">
-            Массовое назначение персонажам
+          <!-- Guide memo -->
+          <div style="
+              background:rgba(167,139,250,.05);
+              border:1px solid rgba(167,139,250,.15);
+              border-radius:8px;
+              padding:10px 11px;
+              margin-bottom:10px;
+              font-size:11px;
+              line-height:1.65;
+              color:rgba(196,181,253,.7)
+          ">
+              <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
+                          color:rgba(167,139,250,.6);margin-bottom:7px">
+                  📖 Быстрый старт
+              </div>
+              <div style="margin-bottom:6px">
+                  <span style="color:rgba(196,181,253,.9);font-weight:600">① Открыть плашку</span><br>
+                  Нажми на плавающую иконку в углу экрана (перетаскивается).
+              </div>
+              <div style="margin-bottom:6px">
+                  <span style="color:rgba(196,181,253,.9);font-weight:600">② Выбрать пресет</span><br>
+                  Дропдаун <b style="color:#a78bfa">✦ Пресет</b> — выбор активного пресета вручную.
+              </div>
+              <div style="margin-bottom:6px">
+                  <span style="color:rgba(196,181,253,.9);font-weight:600">③ Привязать к персонажу</span><br>
+                  Открой чат → выбери пресет → нажми <b style="color:#a78bfa">👤 К персонажу</b>.
+                  При следующем входе пресет применится сам.
+              </div>
+              <div style="margin-bottom:6px">
+                  <span style="color:rgba(196,181,253,.9);font-weight:600">④ Привязать к чату</span><br>
+                  <b style="color:#a78bfa">💬 К чату</b> — привязка к конкретному чату
+                  (приоритет выше, чем у персонажа).
+              </div>
+              <div style="margin-bottom:8px">
+                  <span style="color:rgba(196,181,253,.9);font-weight:600">⑤ Авто-смена</span><br>
+                  В ⚙ включи <b>Авто-смена при переходе</b> — пресет будет меняться сам.
+              </div>
+              <div style="border-top:1px solid rgba(167,139,250,.12);padding-top:7px;
+                          font-size:10px;color:rgba(196,181,253,.45)">
+                  <b style="color:rgba(196,181,253,.6)">🔧 Отладка</b><br>
+                  Плашка пропала → <b>Восстановить окно</b> выше.<br>
+                  Пресет не применяется → проверь <b>Авто-смена</b> и <b>Включено</b> в ⚙.<br>
+                  Что-то сломалось → нажми <b>⟳ Перезапустить</b>.<br>
+                  Консоль браузера: фильтр <code style="color:#a78bfa">[✦KP]</code> для логов.
+              </div>
           </div>
-          <input type="text" id="kp-sb-srch" placeholder="🔍 Поиск по имени..."
-            style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);
-                   border-radius:6px;color:#ddd;font-size:12px;padding:5px 8px;margin-bottom:5px">
-          <div id="kp-sb-list" style="max-height:240px;overflow-y:auto"></div>
 
           <!-- Danger zone -->
           <button id="kp-sb-clr"
@@ -815,19 +853,10 @@ function kpCreateSidebar() {
       </div>
     </div>`);
 
-    kpRenderSidebar();
-
-    jQuery('#kp-sb-srch').on('input', function() {
-        const q = jQuery(this).val().toLowerCase();
-        jQuery('#kp-sb-list .kp-sb-row').each(function() {
-            jQuery(this).toggle(!q || (jQuery(this).data('n') || '').includes(q));
-        });
-    });
-
     jQuery('#kp-sb-clr').on('click', function() {
         if (!confirm('Удалить все привязки?')) return;
         KPS.presetBindings = {}; KPS.bindingMeta = {};
-        kpSave(); kpRenderSidebar(); kpRenderPanel(); kpRefreshPill();
+        kpSave(); kpRenderPanel(); kpRefreshPill();
     });
 
     // Restore floating window to default position
@@ -859,113 +888,6 @@ function kpCreateSidebar() {
     });
 }
 
-function kpRenderSidebar() {
-    const chars = window.characters || [];
-    const el = jQuery('#kp-sb-list').empty();
-    if (!chars.length) {
-        el.html(`
-            <div style="
-                background:rgba(167,139,250,.05);
-                border:1px solid rgba(167,139,250,.15);
-                border-radius:8px;
-                padding:10px 11px;
-                margin:2px 0 4px;
-                font-size:11px;
-                line-height:1.65;
-                color:rgba(196,181,253,.7)
-            ">
-                <div style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;
-                            color:rgba(167,139,250,.6);margin-bottom:7px">
-                    📖 Быстрый старт
-                </div>
-
-                <div style="margin-bottom:6px">
-                    <span style="color:rgba(196,181,253,.9);font-weight:600">① Открыть плашку</span><br>
-                    Нажми на плавающую иконку в углу экрана (перетаскивается).
-                </div>
-
-                <div style="margin-bottom:6px">
-                    <span style="color:rgba(196,181,253,.9);font-weight:600">② Выбрать пресет</span><br>
-                    Дропдаун <b style="color:#a78bfa">✦ Пресет</b> — выбор активного пресета вручную.
-                </div>
-
-                <div style="margin-bottom:6px">
-                    <span style="color:rgba(196,181,253,.9);font-weight:600">③ Привязать к персонажу</span><br>
-                    Открой чат с персонажем → выбери пресет → нажми
-                    <b style="color:#a78bfa">👤 К персонажу</b>.
-                    При следующем входе в этот чат пресет применится сам.
-                </div>
-
-                <div style="margin-bottom:6px">
-                    <span style="color:rgba(196,181,253,.9);font-weight:600">④ Привязать к чату</span><br>
-                    Кнопка <b style="color:#a78bfa">💬 К чату</b> — привязка только к конкретному
-                    чату (приоритет выше, чем у персонажа).
-                </div>
-
-                <div style="margin-bottom:8px">
-                    <span style="color:rgba(196,181,253,.9);font-weight:600">⑤ Авто-смена</span><br>
-                    В ⚙ настройках включи <b>Авто-смена при переходе</b> — пресет будет
-                    меняться автоматически при смене чата.
-                </div>
-
-                <div style="
-                    border-top:1px solid rgba(167,139,250,.12);
-                    padding-top:7px;
-                    font-size:10px;
-                    color:rgba(196,181,253,.45)
-                ">
-                    <b style="color:rgba(196,181,253,.6)">🔧 Отладка</b><br>
-                    Плашка пропала → <b>Восстановить окно</b> выше.<br>
-                    Пресет не применяется → проверь <b>Авто-смена</b> и <b>Включено</b> в ⚙.<br>
-                    Что-то сломалось → нажми <b>⟳ Перезапустить</b>.<br>
-                    Консоль браузера: фильтр <code style="color:#a78bfa">[✦KP]</code> для логов.
-                </div>
-            </div>
-        `);
-        return;
-    }
-    chars.forEach((c, i) => {
-        if (!c?.name) return;
-        const info  = kpMkChar(c, i);
-        const key   = `char_${i}`;
-        const bound = KPS.presetBindings[key] || '';
-        const ava   = info.avatar
-            ? `<img src="${info.avatar}" style="width:20px;height:20px;border-radius:50%;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'">`
-            : `<div style="width:20px;height:20px;border-radius:50%;background:rgba(167,139,250,.15);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:rgba(167,139,250,.7);flex-shrink:0">${info.name.charAt(0).toUpperCase()}</div>`;
-        let opts = `<option value="">—</option>`;
-        kpPresets.forEach(p => { opts += `<option value="${kpEsc(p.label)}"${bound===p.label?' selected':''}>${kpEsc(p.label)}</option>`; });
-
-        el.append(`<div class="kp-sb-row" data-n="${kpEsc(c.name.toLowerCase())}"
-            style="display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03)">
-            ${ava}
-            <span style="flex:1;min-width:0;font-size:11px;color:rgba(210,200,245,.75);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
-                title="${kpEsc(c.name)}">${kpEsc(c.name)}</span>
-            <select data-idx="${i}"
-                style="width:90px;font-size:10px;background:rgba(255,255,255,.05);border:1px solid rgba(167,139,250,.15);border-radius:5px;color:#ddd8ff;padding:2px 4px">${opts}</select>
-            <button class="kp-sb-save" data-idx="${i}"
-                style="background:rgba(167,139,250,.08);border:1px solid rgba(167,139,250,.2);border-radius:5px;color:#c4b5fd;font-size:10px;padding:2px 6px;cursor:pointer">✓</button>
-        </div>`);
-    });
-
-    el.find('.kp-sb-save').on('click', function() {
-        const idx  = parseInt(jQuery(this).data('idx'));
-        const sel  = el.find(`select[data-idx="${idx}"]`).val();
-        const key  = `char_${idx}`;
-        const c    = (window.characters || [])[idx];
-        const info = c ? kpMkChar(c, idx) : null;
-        if (sel) {
-            KPS.presetBindings[key] = sel;
-            KPS.bindingMeta[key] = { name: info?.name || `#${idx}`, avatar: info?.avatar || null };
-        } else {
-            delete KPS.presetBindings[key];
-            delete KPS.bindingMeta[key];
-        }
-        kpSave(); kpRenderPanel(); kpRefreshPill();
-        const btn = jQuery(this);
-        btn.css({ background:'rgba(52,211,153,.12)', borderColor:'rgba(52,211,153,.3)', color:'#6ee7b7' });
-        setTimeout(() => btn.css({ background:'', borderColor:'', color:'' }), 1200);
-    });
-}
 
 // ── Draggable ─────────────────────────────────────────────────────────────────
 function kpDraggable(handle, moveEl, onEnd) {
