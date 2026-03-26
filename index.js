@@ -712,6 +712,30 @@ function kpOpenPanel() {
         }
     }
     jQuery('#kp-float').addClass('kp-open');
+
+    // Clamp panel fully inside viewport (important on mobile)
+    requestAnimationFrame(() => {
+        const el = document.getElementById('kp-float');
+        if (!el) return;
+        const r   = el.getBoundingClientRect();
+        const pad = 8;
+        let newLeft = r.left;
+        let newTop  = r.top;
+        // Push right edge in
+        if (r.right > window.innerWidth - pad)
+            newLeft = window.innerWidth - el.offsetWidth - pad;
+        // Push left edge in
+        if (newLeft < pad) newLeft = pad;
+        // Push bottom edge in
+        if (r.bottom > window.innerHeight - pad)
+            newTop = window.innerHeight - el.offsetHeight - pad;
+        // Push top edge in
+        if (newTop < pad) newTop = pad;
+        if (newLeft !== r.left || newTop !== r.top) {
+            jQuery(el).css({ left: newLeft, top: newTop, right: 'auto', bottom: 'auto' });
+        }
+    });
+
     kpPanelOpen = true;
 
     setTimeout(() => {
@@ -734,19 +758,19 @@ function kpDock() {
     const panel = document.getElementById('kp-float');
     if (!panel) return;
 
-    const chat = document.getElementById('chat');
-    if (chat) {
-        const last = chat.querySelector('.mes:last-child');
-        if (last) chat.insertBefore(panel, last.nextSibling);
-        else chat.appendChild(panel);
-    } else {
-        document.body.appendChild(panel);
-    }
+    // Try containers in priority order — some ST mobile builds hide #chat overflow
+    const container = document.getElementById('chat')
+                   || document.getElementById('sheld')
+                   || document.body;
+    const last = container.querySelector('.mes:last-child');
+    if (last) container.insertBefore(panel, last.nextSibling);
+    else container.appendChild(panel);
 
     jQuery('#kp-float')
         .removeClass('kp-open')
         .addClass('kp-docked')
-        .show();
+        .css({ display: 'block', visibility: 'visible', opacity: '1',
+               position: 'relative', left: '', right: '', top: '', bottom: '' });
     jQuery('#kp-pill').hide();
     kpRenderPanel();
 }
