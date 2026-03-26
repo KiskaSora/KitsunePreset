@@ -1,880 +1,963 @@
 /**
- * ✦ KitsunePreset — менеджер пресетов для SillyTavern
- * by Sora · v2.3 (fix: реальное применение, дефолт пресет, MutationObserver retry)
+ * ✦ KitsunePreset v3.2
+ * ST extension: floating preset manager with chat/char bindings
  */
 
-const MODULE_NAME = 'kitsune-preset';
+// NOTE: Do NOT redefine $ — ST provides jQuery globally
+const KP_MODULE = 'kitsune-preset';
 
-const defaultSettings = {
-    enabled: true,
-    autoSwitch: true,
-    showIndicator: true,
-    indicatorPosition: { x: null, y: null, corner: 'top-right' },
+const KP_DEFAULTS = {
+    enabled:        true,
+    autoSwitch:     true,
+    notify:         false,
+    defaultPreset:  '',
     presetBindings: {},
-    bindingMeta: {},
-    showNotifications: true,
-    animateIndicator: true,
-    defaultPreset: '',   // глобальный пресет для чатов без привязки
+    bindingMeta:    {},
+    pillPos:        { corner: 'top-right', x: null, y: null },
+    panelPos:       { x: null, y: null },
+    docked:         false,
+    useThemeColor:  false,
 };
 
-let settings        = {};
-let availablePresets = [];
-let charBrowserOpen  = false;
-let _pendingPreset   = null;   // имя пресета ожидающего подтверждения
-let _applyLock       = false;  // защита от рекурсии в observer
-let _presetObserver  = null;
+let KPS           = {};    // live settings reference
+let kpPresets     = [];    // [{label, value}]
+let kpObs         = null;  // MutationObserver
+let kpLock        = false;
+let kpLastApply   = 0;
+let kpOptsOpen    = false;
+let kpPanelOpen   = false;
+let kpNotifyLast  = '';
+let kpNotifyTimer = null;
 
-function log(...a) { console.log('[✦KitsunePreset]', ...a); }
-function getSave()  { return window.saveSettingsDebounced || (() => {}); }
-function getExt()   { return window.extension_settings || {}; }
-function getES()    { return window.eventSource; }
-function getET()    { return window.event_types || {}; }
+// ── Logging ───────────────────────────────────────────────────────────────────
+function kpLog(...a) { console.log('[✦KP]', ...a); }
 
-// ── SillyTavern Context ───────────────────────────────────────────────────────
-function getSTContext() {
+// ── Save / Load ───────────────────────────────────────────────────────────────
+function kpSave() {
+    try { localStorage.setItem('kp_' + KP_MODULE, JSON.stringify(KPS)); } catch(e) {}
+    if (!window.extension_settings) return;
+    window.extension_settings[KP_MODULE] = KPS;
+    if (typeof window.saveSettingsDebounced === 'function') window.saveSettingsDebounced();
+}
+
+// ── Theme ─────────────────────────────────────────────────────────────────────
+// CSS берёт все цвета напрямую из ST-переменных (--SmartThemeBlurTintColor и др.)
+// JS только хранит флаг useThemeColor для обратной совместимости настроек
+function kpApplyAccent() {
+    // Ничего не делаем — CSS сам адаптируется к теме через var(--SmartTheme...)
+}
+
+// ── ST Context helpers ────────────────────────────────────────────────────────
+function kpCtx() {
     try { const c = window.SillyTavern?.getContext?.(); if (c) return c; } catch(e) {}
     try { if (typeof window.getContext === 'function') return window.getContext(); } catch(e) {}
     return null;
 }
 
-// ── Текущий персонаж ──────────────────────────────────────────────────────────
-function getCurrentChar() {
+function kpGetChar() {
     try {
-        const ctx   = getSTContext();
-        const chars = (ctx && ctx.characters) || window.characters || [];
-        const chid  = parseInt((ctx && (ctx.characterId ?? ctx.characterID)) ?? window.this_chid);
-        if (!isNaN(chid) && chid >= 0 && chars[chid]) return buildCharInfo(chars[chid], chid);
-        if (ctx && ctx.name2 && ctx.name2 !== 'You') {
-            const f = chars.find(c => c && c.name === ctx.name2);
-            if (f) return buildCharInfo(f, chars.indexOf(f));
-            return { name: ctx.name2, avatar: null, chid: null };
+        const c     = kpCtx();
+        const chars = c?.characters || window.characters || [];
+        const chid  = parseInt(c?.characterId ?? c?.characterID ?? window.this_chid);
+        if (!isNaN(chid) && chid >= 0 && chars[chid]) return kpMkChar(chars[chid], chid);
+        if (c?.name2 && c.name2 !== 'You') {
+            const f = chars.find(x => x?.name === c.name2);
+            if (f) return kpMkChar(f, chars.indexOf(f));
         }
     } catch(e) {}
     try {
         const chid  = parseInt(window.this_chid);
         const chars = window.characters || [];
-        if (!isNaN(chid) && chid >= 0 && chars[chid]) return buildCharInfo(chars[chid], chid);
+        if (!isNaN(chid) && chid >= 0 && chars[chid]) return kpMkChar(chars[chid], chid);
     } catch(e) {}
     try {
-        const name =
-            $('#chat_name_if_not_group_mode .ch_name').text().trim() ||
-            $('#char-name').text().trim() ||
-            $('.ch_name').first().text().trim();
-        if (name) {
+        const n = jQuery('#chat_name_if_not_group_mode .ch_name').text().trim()
+               || jQuery('.ch_name').first().text().trim();
+        if (n) {
             const chars = window.characters || [];
-            const f = chars.find(c => c && c.name === name);
-            if (f) return buildCharInfo(f, chars.indexOf(f));
-            return { name, avatar: null, chid: null };
+            const f = chars.find(x => x?.name === n);
+            if (f) return kpMkChar(f, chars.indexOf(f));
+            return { name: n, avatar: null, chid: null };
         }
     } catch(e) {}
     return null;
 }
 
-function buildCharInfo(c, chid) {
+function kpMkChar(c, chid) {
     const id = parseInt(chid);
-    const avatar = (c.avatar && c.avatar !== 'none') ? '/characters/' + c.avatar : null;
-    return { name: c.name || `Персонаж #${id}`, avatar, chid: isNaN(id) ? null : id };
+    return {
+        name:   c.name || `#${id}`,
+        avatar: (c.avatar && c.avatar !== 'none') ? '/characters/' + c.avatar : null,
+        chid:   isNaN(id) ? null : id,
+    };
 }
 
-function getCurrentChatId() {
+function kpGetChatId() {
     try {
-        const ctx = getSTContext();
-        if (ctx && ctx.chatId)  return String(ctx.chatId);
-        if (ctx && ctx.chat_id) return String(ctx.chat_id);
+        const c = kpCtx();
+        if (c?.chatId)  return String(c.chatId);
+        if (c?.chat_id) return String(c.chat_id);
     } catch(e) {}
     try { if (window.chat_metadata?.chat_id) return String(window.chat_metadata.chat_id); } catch(e) {}
-    try {
-        const n = $('#select_chat_btn .ch_name').text().trim() ||
-                  $('#chat_name_if_not_group_mode .ch_name').text().trim();
-        if (n) return n;
-    } catch(e) {}
     return null;
 }
 
-function avatarHtml(info, size) {
-    const sz = size || 30;
-    const letter = info ? (info.name || '?').charAt(0).toUpperCase() : '?';
-    if (info && info.avatar) {
-        return `<img class="kp-ava" src="${info.avatar}" width="${sz}" height="${sz}"
-                     title="${escHtml(info.name || '')}"
-                     onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-                <div class="kp-ava kp-ava-fb" style="width:${sz}px;height:${sz}px;display:none">${letter}</div>`;
-    }
-    return `<div class="kp-ava kp-ava-fb" style="width:${sz}px;height:${sz}px">${letter}</div>`;
-}
-
-function escHtml(s) {
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
-// ── Пресет-селект ST ──────────────────────────────────────────────────────────
-const KNOWN_PRESET_SELS = [
-    '#settings_preset_openai',
-    '#settings_preset_openai_compat',
-    '#settings_preset',
-    '#api_preset_kobold',
-    '#settings_preset_novel',
-    '#settings_preset_textgenerationwebui',
+// ── Preset select ─────────────────────────────────────────────────────────────
+const KP_SEL_IDS = [
+    '#settings_preset_openai', '#settings_preset_openai_compat',
+    '#settings_preset', '#api_preset_kobold',
+    '#settings_preset_novel', '#settings_preset_textgenerationwebui',
 ];
 
-function findActivePresetSelect() {
-    for (const s of KNOWN_PRESET_SELS) {
-        const el = $(s);
+function kpFindSel() {
+    for (const s of KP_SEL_IDS) {
+        const el = jQuery(s);
         if (el.length && el.find('option').length > 1) return el;
     }
     let found = null;
-    $('select[id*="preset"], select[id*="Preset"]').each(function() {
-        if ($(this).find('option').length > 1) { found = $(this); return false; }
+    jQuery('select').each(function() {
+        const id = (jQuery(this).attr('id') || '').toLowerCase();
+        if (id.includes('preset') && jQuery(this).find('option').length > 1) {
+            found = jQuery(this); return false;
+        }
     });
     return found;
 }
 
-function loadPresetsFromUI() {
-    const el = findActivePresetSelect();
-    if (!el) { log('Пресеты не найдены'); return []; }
-    const list = [];
+function kpLoadPresets() {
+    const el = kpFindSel();
+    if (!el) return [];
+    const out = [];
     el.find('option').each(function() {
-        const text = $(this).text().trim();
-        if (text) list.push({ value: $(this).val(), label: text });
+        const t = jQuery(this).text().trim();
+        if (t) out.push({ value: jQuery(this).val(), label: t });
     });
-    log('Пресеты из', el.attr('id'), ':', list.length);
-    return list;
+    return out;
 }
 
-function getCurrentSTPreset() {
-    const el = findActivePresetSelect();
+function kpGetActive() {
+    const el = kpFindSel();
     return el ? (el.find('option:selected').text().trim() || null) : null;
 }
 
-// ── Ключи привязок ────────────────────────────────────────────────────────────
-function chatKey() {
-    const cid = getCurrentChatId();
-    return cid ? `chat_${cid}` : null;
+// ── Binding keys ──────────────────────────────────────────────────────────────
+// Chat key is per-session: chat_2026-03-24@21h08m41s3
+// Char key is per-character: char_5
+// They are FULLY INDEPENDENT — switching chat clears chat key
+function kpChatKey() { const id = kpGetChatId(); return id ? `chat_${id}` : null; }
+function kpCharKey() {
+    const info = kpGetChar();
+    if (info?.chid != null) return `char_${info.chid}`;
+    const id = parseInt(window.this_chid);
+    return (!isNaN(id) && id >= 0) ? `char_${id}` : null;
 }
 
-function charKey() {
-    const info = getCurrentChar();
-    if (info && info.chid !== null && info.chid !== undefined) return `char_${info.chid}`;
-    const chid = parseInt(window.this_chid);
-    if (!isNaN(chid) && chid >= 0) return `char_${chid}`;
+function kpSaveMeta(key) {
+    const info = kpGetChar(), chatId = kpGetChatId();
+    if (!KPS.bindingMeta) KPS.bindingMeta = {};
+    KPS.bindingMeta[key] = key.startsWith('char_')
+        ? { name: info?.name || key, avatar: info?.avatar || null }
+        : { name: chatId ? chatId.substring(0, 32) : key, charName: info?.name || '?', avatar: info?.avatar || null };
+}
+
+// Priority: chat binding > char binding > default preset
+function kpResolve() {
+    const ck = kpChatKey(), chk = kpCharKey();
+    return (ck  && KPS.presetBindings[ck])
+        || (chk && KPS.presetBindings[chk])
+        || KPS.defaultPreset || null;
+}
+
+function kpBindingType() {
+    const ck = kpChatKey(), chk = kpCharKey();
+    if (ck  && KPS.presetBindings[ck])  return 'chat';
+    if (chk && KPS.presetBindings[chk]) return 'char';
     return null;
 }
 
-function saveBindingMeta(key) {
-    if (!settings.bindingMeta) settings.bindingMeta = {};
-    const info   = getCurrentChar();
-    const chatId = getCurrentChatId();
-    if (key.startsWith('char_')) {
-        settings.bindingMeta[key] = { name: info?.name || key, avatar: info?.avatar || null };
-    } else {
-        settings.bindingMeta[key] = {
-            name:     chatId ? chatId.substring(0, 30) : key,
-            charName: info?.name || '?',
-            avatar:   info?.avatar || null,
-        };
-    }
-}
-
-// Какой пресет нужен сейчас: привязка к чату > привязка к персу > дефолт
-function resolvePreset() {
-    const ck  = chatKey(), chk = charKey();
-    return (ck  && settings.presetBindings[ck])  ||
-           (chk && settings.presetBindings[chk]) ||
-           settings.defaultPreset ||
-           null;
-}
-
-// ── Применение пресета ────────────────────────────────────────────────────────
-function applySelectValue(el, val) {
-    if (!el || !el.length) return false;
-    const native = el[0];
-    // Нативный setter (обходит framework-обёртки)
+// ── Apply preset ──────────────────────────────────────────────────────────────
+function kpSetSel(el, val) {
+    if (!el?.length) return false;
+    const n = el[0];
     try {
-        const desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
-        if (desc && desc.set) desc.set.call(native, val);
-        else native.value = val;
-    } catch(e) { native.value = val; }
-    // jQuery события (ST слушает через jQuery)
+        const d = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+        if (d?.set) d.set.call(n, val); else n.value = val;
+    } catch(e) { n.value = val; }
     el.trigger('focus').trigger('input').trigger('change');
-    // Нативные DOM-события (резерв)
-    try { native.dispatchEvent(new Event('input',  { bubbles: true })); } catch(e) {}
-    try { native.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {}
+    try { n.dispatchEvent(new Event('input',  { bubbles: true })); } catch(e) {}
+    try { n.dispatchEvent(new Event('change', { bubbles: true })); } catch(e) {}
     return true;
 }
 
-function switchInST(name) {
+function kpApply(name, silent) {
     if (!name) return false;
+    const findOpt = el => el.find('option').filter(function() {
+        return jQuery(this).text().trim() === name || jQuery(this).val() === name;
+    });
 
-    function findOpt(el) {
-        return el.find('option').filter(function() {
-            return $(this).text().trim() === name || $(this).val() === name;
-        });
-    }
-
-    // 1. Известные ID
-    for (const s of KNOWN_PRESET_SELS) {
-        const el = $(s);
+    let ok = false;
+    for (const s of KP_SEL_IDS) {
+        const el = jQuery(s);
         if (!el.length) continue;
         const opt = findOpt(el);
-        if (opt.length) { applySelectValue(el, opt.first().val()); log('✓ via', s, name); return true; }
+        if (opt.length) { kpSetSel(el, opt.first().val()); ok = true; kpLog('✓', s, name); break; }
     }
-    // 2. Любой preset-select
-    let ok = false;
-    $('select').each(function() {
-        if (ok) return false;
-        if (!($(this).attr('id') || '').toLowerCase().includes('preset')) return;
-        const opt = findOpt($(this));
-        if (opt.length) { applySelectValue($(this), opt.first().val()); log('✓ via fallback', $(this).attr('id'), name); ok = true; }
-    });
-    if (ok) return true;
-    // 3. window.*
-    for (const fn of ['applyPreset','applyOpenAIPreset','loadPreset','selectPreset']) {
-        if (typeof window[fn] === 'function') {
-            try { window[fn](name); log('✓ via window.' + fn); return true; } catch(e) {}
-        }
+    if (!ok) {
+        jQuery('select').each(function() {
+            if (ok) return false;
+            if (!(jQuery(this).attr('id') || '').toLowerCase().includes('preset')) return;
+            const opt = findOpt(jQuery(this));
+            if (opt.length) { kpSetSel(jQuery(this), opt.first().val()); ok = true; }
+        });
     }
-    // 4. context API
-    try {
-        const ctx = getSTContext();
-        if (ctx) {
-            for (const m of ['setPreset','applyPreset']) {
-                if (typeof ctx[m] === 'function') { ctx[m](name); log('✓ via ctx.' + m); return true; }
+    if (!ok) {
+        for (const fn of ['applyPreset','applyOpenAIPreset','loadPreset','selectPreset']) {
+            if (typeof window[fn] === 'function') {
+                try { window[fn](name); ok = true; break; } catch(e) {}
             }
         }
-    } catch(e) {}
+    }
 
-    log('⚠ Пресет не найден:', name, '| Доступные:', availablePresets.map(p => p.label).join(', '));
-    notify('Пресет не найден: ' + name + ' — нажмите "Обновить"');
-    return false;
+    if (ok) {
+        kpLastApply = Date.now();
+        kpLockSet(true);
+        setTimeout(() => kpLockSet(false), 2200);
+        if (!silent) kpNotify(name);
+        kpRefreshPill();
+        kpUpdatePanel();
+    }
+    return ok;
 }
 
-/**
- * Применяет пресет + retry через 600мс и 1400мс.
- * Нужно потому что ST после загрузки чата сам перезаписывает настройки.
- */
-function switchWithRetry(name) {
+// Retry: ST sometimes resets select after CHAT_CHANGED
+function kpApplyRetry(name) {
     if (!name) return;
-    _pendingPreset = name;
-    switchInST(name);
-
-    setTimeout(() => {
-        if (_pendingPreset !== name) return;
-        if (getCurrentSTPreset() !== name) { log('retry #1'); switchInST(name); }
-        setTimeout(() => {
-            if (_pendingPreset !== name) return;
-            if (getCurrentSTPreset() !== name) { log('retry #2'); switchInST(name); }
-            _pendingPreset = null;
-        }, 800);
-    }, 600);
+    kpApply(name, true);
+    setTimeout(() => { if (kpGetActive() !== name) { kpApply(name, true); kpLog('retry#1'); } }, 600);
+    setTimeout(() => { if (kpGetActive() !== name) { kpApply(name, true); kpLog('retry#2'); } }, 1400);
 }
 
-// ── MutationObserver: следим чтобы ST не сбросил наш пресет ──────────────────
-function startPresetObserver() {
-    stopPresetObserver();
-    const el = findActivePresetSelect();
-    if (!el || !el.length) return;
+function kpLockSet(v) { kpLock = v; }
 
-    _presetObserver = new MutationObserver(() => {
-        if (_applyLock) return;
-        const needed = resolvePreset();
-        if (!needed) return;
-        const actual = getCurrentSTPreset();
-        if (actual && actual !== needed) {
-            log('[Observer] ST сбросил к', actual, '→ исправляем на', needed);
-            _applyLock = true;
-            switchInST(needed);
-            setTimeout(() => { _applyLock = false; }, 400);
+// ── MutationObserver ──────────────────────────────────────────────────────────
+function kpStartObs() {
+    if (kpObs) { kpObs.disconnect(); kpObs = null; }
+    const el = kpFindSel();
+    if (!el?.length) return;
+    kpObs = new MutationObserver(() => {
+        if (kpLock) return;
+        const need = kpResolve();
+        if (!need) return;
+        const have = kpGetActive();
+        if (have && have !== need) {
+            kpLog('[Obs] ST reset', have, '→', need);
+            kpLockSet(true);
+            kpApply(need, true);
+            setTimeout(() => kpLockSet(false), 700);
         }
     });
+    kpObs.observe(el[0], { attributes: true });
+    if (el[0].parentElement) kpObs.observe(el[0].parentElement, { childList: true });
+}
 
-    _presetObserver.observe(el[0], { attributes: true, childList: false });
-    if (el[0].parentElement) {
-        _presetObserver.observe(el[0].parentElement, { childList: true });
+// ── Notify (single fire, debounced) ──────────────────────────────────────────
+function kpNotify(msg) {
+    if (!KPS.notify) return;
+    if (kpNotifyLast === msg) return;
+    clearTimeout(kpNotifyTimer);
+    kpNotifyTimer = setTimeout(() => {
+        kpNotifyLast = msg;
+        if (typeof toastr !== 'undefined') toastr.info(msg, '✦ KitsunePreset', { timeOut: 2000 });
+        setTimeout(() => { kpNotifyLast = ''; }, 4000);
+    }, 350);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function kpInit() {
+    if (window._kpInitDone) { kpLog('already initialized, skip'); return; }
+    kpLog('init...');
+
+    try {
+        // Poll up to 5s for extension_settings
+        for (let i = 0; i < 50; i++) {
+            if (window.extension_settings) break;
+            await new Promise(r => setTimeout(r, 100));
+        }
+        kpLog('ext_settings present:', !!window.extension_settings);
+
+        if (!window.extension_settings) {
+            kpLog('\u26a0 falling back to local storage');
+            window.extension_settings = {};
+        }
+
+        const ext = window.extension_settings;
+        if (!ext[KP_MODULE] || typeof ext[KP_MODULE] !== 'object') {
+            let saved = null;
+            try { saved = localStorage.getItem('kp_' + KP_MODULE); } catch(e) {}
+            ext[KP_MODULE] = saved ? JSON.parse(saved) : JSON.parse(JSON.stringify(KP_DEFAULTS));
+        }
+        KPS = ext[KP_MODULE];
+
+        for (const [k, v] of Object.entries(KP_DEFAULTS)) {
+            if (KPS[k] === undefined)
+                KPS[k] = (v !== null && typeof v === 'object') ? JSON.parse(JSON.stringify(v)) : v;
+        }
+        if (!KPS.presetBindings) KPS.presetBindings = {};
+        if (!KPS.bindingMeta)    KPS.bindingMeta    = {};
+
+        kpLog('settings OK');
+
+        await new Promise(r => setTimeout(r, 1200));
+        kpPresets = kpLoadPresets();
+        kpLog('presets loaded:', kpPresets.length);
+
+        kpLog('creating pill...');   kpCreatePill();
+        kpLog('creating panel...');  kpCreatePanel();
+        kpLog('creating sidebar...'); kpCreateSidebar();
+        kpLog('registering events...'); kpRegisterEvents();
+        kpStartObs();
+
+        if (KPS.docked) {
+            await new Promise(r => setTimeout(r, 500));
+            kpDock();
+        }
+
+        const need = kpResolve();
+        if (need && KPS.enabled && KPS.autoSwitch) {
+            await new Promise(r => setTimeout(r, 500));
+            kpApplyRetry(need);
+        }
+
+        window._kpInitDone = true;
+        kpLog('ready \u2713');
+
+    } catch(err) {
+        kpLog('\u274c init error:', err && err.message, err && err.stack);
     }
-    log('[Observer] запущен на', el.attr('id'));
 }
 
-function stopPresetObserver() {
-    if (_presetObserver) { _presetObserver.disconnect(); _presetObserver = null; }
-}
-
-// ── Инициализация ─────────────────────────────────────────────────────────────
-async function init() {
-    log('Инициализация...');
-    const ext = getExt();
-    if (!ext[MODULE_NAME]) ext[MODULE_NAME] = { ...defaultSettings };
-    settings = ext[MODULE_NAME];
-    if (!settings.presetBindings)           settings.presetBindings  = {};
-    if (!settings.bindingMeta)              settings.bindingMeta     = {};
-    if (settings.defaultPreset === undefined) settings.defaultPreset = '';
-    if (typeof settings.indicatorPosition !== 'object' || !settings.indicatorPosition)
-        settings.indicatorPosition = { x: null, y: null, corner: 'top-right' };
-
-    await new Promise(r => setTimeout(r, 1200));
-    availablePresets = loadPresetsFromUI();
-    createIndicator();
-    createPanel();
-    registerEvents();
-    startPresetObserver();
-    log('Готово. Пресетов:', availablePresets.length);
-    refreshAll();
-
-    // Применяем при старте
-    const needed = resolvePreset();
-    if (needed && settings.enabled && settings.autoSwitch) {
-        await new Promise(r => setTimeout(r, 400));
-        switchWithRetry(needed);
-    }
-}
-
-// ── Индикатор ─────────────────────────────────────────────────────────────────
-function indicatorCSS() {
-    const p = settings.indicatorPosition;
+// ── Pill ──────────────────────────────────────────────────────────────────────
+function kpPillStyle() {
+    const p = KPS.pillPos;
     if (p.x !== null && p.y !== null) return `left:${p.x}px;top:${p.y}px`;
-    const m = {
+    const map = {
         'top-left':     'top:66px;left:12px',
         'top-right':    'top:66px;right:12px',
-        'bottom-left':  'bottom:76px;left:12px',
-        'bottom-right': 'bottom:76px;right:12px',
+        'bottom-left':  'bottom:80px;left:12px',
+        'bottom-right': 'bottom:80px;right:12px',
     };
-    return m[p.corner] || 'top:66px;right:12px';
+    return map[p.corner] || 'top:66px;right:12px';
 }
 
-function createIndicator() {
-    $('#kp-indicator').remove();
-    if (!settings.showIndicator) return;
-    $('body').append(`
-        <div id="kp-indicator" style="position:fixed;${indicatorCSS()};z-index:99999;display:none;cursor:grab">
-            <div id="kp-ind-inner">
-                <span class="kp-star">✦</span>
-                <div id="kp-ind-ava"></div>
-                <span id="kp-ind-text">—</span>
+function kpCreatePill() {
+    jQuery('#kp-pill').remove();
+    if (KPS.docked) return;
+
+    jQuery('body').append(`
+        <div id="kp-pill" style="position:fixed;z-index:99998;${kpPillStyle()}">
+            <div id="kp-pill-in">
+                <div id="kp-pill-ava"></div>
+                <span id="kp-pill-ico">✦</span>
+                <span id="kp-pill-txt">—</span>
             </div>
         </div>`);
-    makeDraggable(document.getElementById('kp-indicator'));
-    $('#kp-indicator').on('click', function() {
-        if (!$(this).data('dragged')) showQuickMenu();
+
+    kpDraggable(jQuery('#kp-pill')[0], null, pos => {
+        KPS.pillPos = { x: Math.round(pos.x), y: Math.round(pos.y), corner: null };
+        kpSave();
     });
+
+    jQuery('#kp-pill').on('click', function() {
+        if (!jQuery(this).data('kpdrag')) kpTogglePanel();
+    });
+
+    kpRefreshPill();
 }
 
-function makeDraggable(el) {
-    let sx, sy, sl, st, moved = false;
-    $(el).on('mousedown', function(e) {
-        if (e.button !== 0) return;
-        moved = false;
-        const r = el.getBoundingClientRect();
-        sx = e.clientX; sy = e.clientY; sl = r.left; st = r.top;
-        $(el).css({ left: sl, top: st, right: 'auto', bottom: 'auto' }).data('dragged', false);
-        function mv(ev) {
-            const dx = ev.clientX - sx, dy = ev.clientY - sy;
-            if (!moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
-                moved = true; $(el).css('cursor','grabbing').data('dragged', true);
-            }
-            if (!moved) return;
-            $(el).css({
-                left: Math.max(0, Math.min(window.innerWidth  - el.offsetWidth,  sl + dx)),
-                top:  Math.max(0, Math.min(window.innerHeight - el.offsetHeight, st + dy)),
-            });
-        }
-        function up() {
-            $(document).off('mousemove.kpdrag mouseup.kpdrag');
-            $(el).css('cursor','grab');
-            if (moved) {
-                const r2 = el.getBoundingClientRect();
-                settings.indicatorPosition = { x: Math.round(r2.left), y: Math.round(r2.top), corner: null };
-                save();
-            }
-        }
-        $(document).on('mousemove.kpdrag', mv).on('mouseup.kpdrag', up);
-        e.preventDefault();
-    });
-}
+function kpRefreshPill() {
+    if (KPS.docked) { jQuery('#kp-pill').hide(); return; }
+    const name = kpResolve() || kpGetActive();
+    if (!name) { jQuery('#kp-pill').hide(); return; }
 
-function refreshAll() { refreshIndicator(); syncPanel(); }
+    const info  = kpGetChar();
+    const isDef = !kpBindingType();
 
-function refreshIndicator() {
-    if (!settings.showIndicator) { $('#kp-indicator').hide(); return; }
-    if (!$('#kp-indicator').length) createIndicator();
+    kpApplyAccent();
 
-    const ck  = chatKey(), chk = charKey();
-    const isChat = !!(ck  && settings.presetBindings[ck]);
-    const isChar = !!(chk && settings.presetBindings[chk]);
-    const isDef  = !isChat && !isChar && !!settings.defaultPreset;
-    const name   = resolvePreset() || getCurrentSTPreset();
-    const info   = getCurrentChar();
-
-    if (!name) { $('#kp-indicator').hide(); return; }
-
-    if (info && info.avatar) {
-        $('#kp-ind-ava').html(`<img src="${info.avatar}" width="16" height="16" class="kp-ind-ava-img" onerror="this.style.display='none'">`);
+    // Avatar
+    const avaEl = jQuery('#kp-pill-ava');
+    if (info?.avatar) {
+        avaEl.html(`<img src="${info.avatar}" alt=""
+            onerror="this.parentElement.innerHTML='<div class=kp-pill-fb>${kpEsc((info?.name||'?').charAt(0).toUpperCase())}</div>'">`);
     } else {
-        $('#kp-ind-ava').empty();
+        avaEl.html(`<div class="kp-pill-fb">${(info?.name||'?').charAt(0).toUpperCase()}</div>`);
     }
 
-    const prefix = isDef ? '⚙' : '✦';
-    $('#kp-ind-text').text(`${prefix} ${name}`);
-    $('#kp-ind-inner')
-        .toggleClass('kp-ind-custom',  !!(isChat || isChar))
-        .toggleClass('kp-ind-default', isDef);
-    $('#kp-indicator').show();
-
-    if (settings.animateIndicator) {
-        $('#kp-indicator').addClass('kp-pulse');
-        setTimeout(() => $('#kp-indicator').removeClass('kp-pulse'), 700);
-    }
+    jQuery('#kp-pill-ico').text(isDef ? '⚙' : '✦');
+    jQuery('#kp-pill-txt').text(name);
+    jQuery('#kp-pill').show();
 }
 
-// ── Панель ────────────────────────────────────────────────────────────────────
-function presetOpts(sel, emptyLabel) {
-    const lbl = emptyLabel || 'По умолчанию';
-    let h = `<option value="">— ${lbl} —</option>`;
-    availablePresets.forEach(p => {
-        h += `<option value="${escHtml(p.label)}" ${sel === p.label ? 'selected' : ''}>${escHtml(p.label)}</option>`;
+// ── Panel ─────────────────────────────────────────────────────────────────────
+function kpCreatePanel() {
+    jQuery('#kp-float').remove();
+    const p = KPS.panelPos;
+    const style = (p.x !== null && p.y !== null) ? `left:${p.x}px;top:${p.y}px` : 'top:100px;right:12px';
+    jQuery('body').append(`<div id="kp-float" style="position:fixed;z-index:99999;${style}"></div>`);
+    kpRenderPanel();
+}
+
+function kpOpts(sel, emptyLabel) {
+    let h = `<option value="">${kpEsc(emptyLabel || '— Не выбран —')}</option>`;
+    kpPresets.forEach(p => {
+        h += `<option value="${kpEsc(p.label)}"${sel === p.label ? ' selected' : ''}>${kpEsc(p.label)}</option>`;
     });
     return h;
 }
 
-function cornerVal() {
-    const p = settings.indicatorPosition;
-    return p.x !== null ? 'custom' : (p.corner || 'top-right');
+function kpRenderPanel() {
+    const info     = kpGetChar();
+    const chatId   = kpGetChatId();
+    const ck       = kpChatKey(), chk = kpCharKey();
+    const chatBound = (ck  && KPS.presetBindings[ck])  || '';
+    const charBound = (chk && KPS.presetBindings[chk]) || '';
+    const cur      = kpResolve() || kpGetActive() || '';
+
+    // Avatar
+    let avaHTML = info?.avatar
+        ? `<img class="kp-fp-ava" src="${info.avatar}"
+               onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+           <div class="kp-fp-ava-fb" style="display:none">${info.name.charAt(0).toUpperCase()}</div>`
+        : `<div class="kp-fp-ava-fb">${info ? info.name.charAt(0).toUpperCase() : '?'}</div>`;
+
+    // Bindings — split into chats and chars tabs
+    const allB    = Object.entries(KPS.presetBindings);
+    const chatBs  = allB.filter(([k]) => k.startsWith('chat_'));
+    const charBs  = allB.filter(([k]) => k.startsWith('char_'));
+
+    function biRows(pairs, isChat) {
+        if (!pairs.length) return '<div class="kp-bi-empty">Нет привязок</div>';
+        return pairs.map(([key, preset]) => {
+            const meta  = KPS.bindingMeta?.[key];
+            const label = isChat
+                ? (meta?.charName || key.replace('chat_','').substring(0,22))
+                : (meta?.name     || key.replace('char_','#'));
+            return `<div class="kp-bi-row">
+                <span class="kp-bi-ic">${isChat ? '💬' : '👤'}</span>
+                <span class="kp-bi-name" title="${kpEsc(key)}">${kpEsc(label)}</span>
+                <span class="kp-bi-arr">›</span>
+                <span class="kp-bi-preset" title="${kpEsc(preset)}">${kpEsc(preset)}</span>
+            </div>`;
+        }).join('');
+    }
+
+    const biChatHTML = biRows(chatBs, true);
+    const biCharHTML = biRows(charBs, false);
+
+    jQuery('#kp-float').html(`
+        <div class="kp-hdr" id="kp-hdr">
+            <div class="kp-hdr-bg"${info?.avatar ? ` style="background-image:url('${info.avatar}')"` : ''}></div>
+            <div class="kp-hdr-ov"></div>
+            <div class="kp-hdr-row">
+                ${avaHTML}
+                <div class="kp-hdr-info">
+                    <div class="kp-hdr-name">${kpEsc(info?.name || 'Персонаж не выбран')}</div>
+                    <div class="kp-hdr-chat">${kpEsc(chatId ? chatId.substring(0,30) : 'Нет чата')}</div>
+                </div>
+                <button class="kp-x" id="kp-x">✕</button>
+            </div>
+        </div>
+
+        <div class="kp-body">
+            <div class="kp-sec">
+                <div class="kp-sec-lbl">✦ Пресет</div>
+                <select class="kp-sel" id="kp-psel">${kpOpts(cur)}</select>
+            </div>
+            <div class="kp-sec">
+                <div class="kp-sec-lbl">Привязать</div>
+                <div class="kp-bind-row">
+                    <button class="kp-bb${chatBound?' kp-bb-on':''}" id="kp-bchat"
+                        title="${chatBound ? 'Привязан к чату: '+chatBound+'. Нажать → снять' : 'Привязать выбранный пресет к этому чату'}">
+                        💬 ${chatBound ? kpEsc(chatBound.substring(0,13)) : 'К чату'}
+                    </button>
+                    <button class="kp-bb${charBound?' kp-bb-on':''}" id="kp-bchar"
+                        title="${charBound ? 'Привязан к персонажу: '+charBound+'. Нажать → снять' : 'Привязать выбранный пресет к персонажу'}">
+                        👤 ${charBound ? kpEsc(charBound.substring(0,13)) : 'К персонажу'}
+                    </button>
+                </div>
+            </div>
+            <div class="kp-sec">
+                <div class="kp-sec-lbl">Все привязки</div>
+                <div class="kp-bi-tabs">
+                    <button class="kp-bi-tab kp-bi-tab-on" data-pane="kp-bi-chats">
+                        💬 Чаты<span class="kp-bi-badge">${chatBs.length}</span>
+                    </button>
+                    <button class="kp-bi-tab" data-pane="kp-bi-chars">
+                        👤 Персонажи<span class="kp-bi-badge">${charBs.length}</span>
+                    </button>
+                </div>
+                <div class="kp-bi-pane kp-bi-pane-on" id="kp-bi-chats">
+                    <div class="kp-bi-list">${biChatHTML}</div>
+                </div>
+                <div class="kp-bi-pane" id="kp-bi-chars">
+                    <div class="kp-bi-list">${biCharHTML}</div>
+                </div>
+            </div>
+            <div class="kp-sec">
+                <div class="kp-sec-lbl">⚙ По умолчанию (для чатов без привязки)</div>
+                <select class="kp-sel kp-sel-def" id="kp-dsel">${kpOpts(KPS.defaultPreset, '— Не задан —')}</select>
+            </div>
+        </div>
+
+        <div class="kp-foot">
+            <button class="kp-foot-btn${KPS.docked?' kp-foot-on':''}" id="kp-dock">
+                📌 ${KPS.docked ? 'Открепить' : 'К чату'}
+            </button>
+            <button class="kp-foot-gear${kpOptsOpen?' kp-foot-gear-on':''}" id="kp-gear" title="Настройки">⚙</button>
+        </div>
+
+        <div class="kp-opts${kpOptsOpen?' kp-opts-on':''}" id="kp-opts">
+            <label class="kp-opt"><input type="checkbox" id="kp-chk-auto"  ${KPS.autoSwitch?'checked':''}>    Авто-смена при переходе</label>
+            <label class="kp-opt"><input type="checkbox" id="kp-chk-ntf"   ${KPS.notify?'checked':''}>        Уведомления</label>
+            <label class="kp-opt"><input type="checkbox" id="kp-chk-theme" ${KPS.useThemeColor?'checked':''}> Цвет темы ST</label>
+            <label class="kp-opt"><input type="checkbox" id="kp-chk-ena"   ${KPS.enabled?'checked':''}>       Включено</label>
+            <button class="kp-ref-btn" id="kp-ref">⟳ Обновить пресеты</button>
+        </div>
+    `);
+
+    // Header is drag handle for whole panel
+    kpDraggable(jQuery('#kp-hdr')[0], jQuery('#kp-float')[0], pos => {
+        if (!KPS.docked) { KPS.panelPos = { x: Math.round(pos.x), y: Math.round(pos.y) }; kpSave(); }
+    });
+
+    kpBindPanel();
+    kpApplyAccent();
 }
 
-function createPanel() {
-    $('#kp-settings').remove();
-    const s         = settings;
-    const ck        = chatKey(), chk = charKey();
-    const chatBound = (ck  && s.presetBindings[ck])  || '';
-    const charBound = (chk && s.presetBindings[chk]) || '';
-    const curSel    = chatBound || charBound || '';
-    const info      = getCurrentChar();
-    const chatId    = getCurrentChatId();
+function kpUpdatePanel() {
+    // Lightweight: only update preset select + bind buttons (no full re-render)
+    if (!jQuery('#kp-float:visible').length && !KPS.docked) return;
+    const ck = kpChatKey(), chk = kpCharKey();
+    const chatBound = (ck  && KPS.presetBindings[ck])  || '';
+    const charBound = (chk && KPS.presetBindings[chk]) || '';
+    const cur = kpResolve() || kpGetActive() || '';
 
-    $('#extensions_settings2').append(`
+    jQuery('#kp-psel').val(cur);
+    jQuery('#kp-bchat')
+        .toggleClass('kp-bb-on', !!chatBound)
+        .text(chatBound ? '💬 ' + chatBound.substring(0,13) : '💬 К чату');
+    jQuery('#kp-bchar')
+        .toggleClass('kp-bb-on', !!charBound)
+        .text(charBound ? '👤 ' + charBound.substring(0,13) : '👤 К персонажу');
+
+    // Update header avatar/name
+    const info   = kpGetChar();
+    const chatId = kpGetChatId();
+    jQuery('.kp-hdr-name').text(info?.name || 'Персонаж не выбран');
+    jQuery('.kp-hdr-chat').text(chatId ? chatId.substring(0,30) : 'Нет чата');
+    if (info?.avatar) {
+        jQuery('.kp-hdr-bg').css('background-image', `url('${info.avatar}')`);
+        jQuery('.kp-fp-ava').attr('src', info.avatar).show();
+        jQuery('.kp-fp-ava-fb').hide();
+    }
+}
+
+function kpBindPanel() {
+    jQuery('#kp-x').on('click', kpClosePanel);
+
+    // Preset select → apply + auto-bind to current chat/char so it survives reload
+    jQuery('#kp-psel').on('change', function() {
+        const v = jQuery(this).val();
+        if (!v) return;
+        // Lock observer for 2s so it doesn't fight the manual selection
+        kpLockSet(true);
+        setTimeout(() => kpLockSet(false), 2000);
+        // Auto-save as chat binding (or char binding as fallback) — silently
+        const ck  = kpChatKey();
+        const chk = kpCharKey();
+        if (ck) {
+            KPS.presetBindings[ck] = v;
+            kpSaveMeta(ck);
+        } else if (chk) {
+            KPS.presetBindings[chk] = v;
+            kpSaveMeta(chk);
+        }
+        kpSave();
+        kpApply(v);
+        kpRenderPanel(); kpRefreshPill();
+    });
+
+    // Bind to chat (toggle)
+    jQuery('#kp-bchat').on('click', function() {
+        const ck = kpChatKey();
+        if (!ck) { kpToast('Сначала откройте чат'); return; }
+        const preset = jQuery('#kp-psel').val() || kpGetActive();
+        if (!preset) { kpToast('Выберите пресет'); return; }
+        if (KPS.presetBindings[ck] === preset) {
+            delete KPS.presetBindings[ck];
+            delete KPS.bindingMeta[ck];
+            kpSave(); kpRenderPanel(); kpRefreshPill();
+            kpToast('Привязка к чату снята');
+        } else {
+            KPS.presetBindings[ck] = preset;
+            kpSaveMeta(ck);
+            kpSave(); kpRenderPanel(); kpRefreshPill();
+            kpApply(preset);
+            kpToast('💬 Чат → ' + preset);
+        }
+    });
+
+    // Bind to char (toggle)
+    jQuery('#kp-bchar').on('click', function() {
+        const chk = kpCharKey();
+        if (!chk) { kpToast('Персонаж не определён'); return; }
+        const preset = jQuery('#kp-psel').val() || kpGetActive();
+        if (!preset) { kpToast('Выберите пресет'); return; }
+        if (KPS.presetBindings[chk] === preset) {
+            delete KPS.presetBindings[chk];
+            delete KPS.bindingMeta[chk];
+            kpSave(); kpRenderPanel(); kpRefreshPill();
+            kpToast('Привязка к персонажу снята');
+        } else {
+            KPS.presetBindings[chk] = preset;
+            kpSaveMeta(chk);
+            kpSave(); kpRenderPanel(); kpRefreshPill();
+            kpApply(preset);
+            kpToast('👤 Персонаж → ' + preset);
+        }
+    });
+
+    // Tab switch in bindings
+    jQuery(document).off('click.kpbitab').on('click.kpbitab', '.kp-bi-tab', function() {
+        const pane = jQuery(this).data('pane');
+        jQuery('.kp-bi-tab').removeClass('kp-bi-tab-on');
+        jQuery(this).addClass('kp-bi-tab-on');
+        jQuery('.kp-bi-pane').removeClass('kp-bi-pane-on');
+        jQuery('#' + pane).addClass('kp-bi-pane-on');
+    });
+
+    // Default preset
+    jQuery('#kp-dsel').on('change', function() {
+        KPS.defaultPreset = jQuery(this).val();
+        kpSave(); kpRefreshPill();
+        if (KPS.defaultPreset && !kpBindingType()) kpApply(KPS.defaultPreset);
+        kpToast(KPS.defaultPreset ? '⚙ Дефолт: ' + KPS.defaultPreset : 'Дефолт сброшен');
+    });
+
+    // Dock toggle
+    jQuery('#kp-dock').on('click', function() {
+        KPS.docked = !KPS.docked;
+        kpSave();
+        KPS.docked ? kpDock() : kpUndock();
+    });
+
+    // Gear
+    jQuery('#kp-gear').on('click', function() {
+        kpOptsOpen = !kpOptsOpen;
+        jQuery('#kp-opts').toggleClass('kp-opts-on', kpOptsOpen);
+        jQuery(this).toggleClass('kp-foot-gear-on', kpOptsOpen);
+    });
+
+    // Options
+    jQuery('#kp-chk-auto').on('change',  function() { KPS.autoSwitch    = this.checked; kpSave(); });
+    jQuery('#kp-chk-ntf').on('change',   function() { KPS.notify        = this.checked; kpSave(); });
+    jQuery('#kp-chk-theme').on('change', function() {
+        KPS.useThemeColor = this.checked;
+        kpSave();
+        kpApplyAccent(); // immediate color update
+    });
+    jQuery('#kp-chk-ena').on('change',   function() { KPS.enabled       = this.checked; kpSave(); });
+    jQuery('#kp-ref').on('click', function() {
+        kpPresets = kpLoadPresets();
+        kpRenderPanel();
+        kpStartObs();
+        kpToast('⟳ ' + kpPresets.length + ' пресетов');
+    });
+}
+
+function kpTogglePanel() {
+    kpPanelOpen ? kpClosePanel() : kpOpenPanel();
+}
+
+function kpOpenPanel() {
+    if (KPS.docked) return;
+    kpRenderPanel();
+
+    // Position near pill if no saved pos
+    if (KPS.panelPos.x === null) {
+        const pill = document.getElementById('kp-pill');
+        if (pill) {
+            const r = pill.getBoundingClientRect();
+            jQuery('#kp-float').css({
+                left:   Math.min(r.left, window.innerWidth - 295),
+                top:    r.bottom + 6,
+                right:  'auto',
+                bottom: 'auto',
+            });
+        }
+    }
+    jQuery('#kp-float').addClass('kp-open');
+    kpPanelOpen = true;
+
+    setTimeout(() => {
+        jQuery(document).one('mousedown.kpout', e => {
+            if (!jQuery(e.target).closest('#kp-float,#kp-pill').length) kpClosePanel();
+        });
+    }, 50);
+}
+
+function kpClosePanel() {
+    if (KPS.docked) return;
+    jQuery('#kp-float').removeClass('kp-open');
+    jQuery(document).off('mousedown.kpout');
+    kpPanelOpen = false;
+}
+
+// ── Dock ──────────────────────────────────────────────────────────────────────
+function kpDock() {
+    KPS.docked = true;
+    const panel = document.getElementById('kp-float');
+    if (!panel) return;
+
+    const chat = document.getElementById('chat');
+    if (chat) {
+        const last = chat.querySelector('.mes:last-child');
+        if (last) chat.insertBefore(panel, last.nextSibling);
+        else chat.appendChild(panel);
+    } else {
+        document.body.appendChild(panel);
+    }
+
+    jQuery('#kp-float')
+        .removeClass('kp-open')
+        .addClass('kp-docked')
+        .show();
+    jQuery('#kp-pill').hide();
+    kpRenderPanel();
+}
+
+function kpUndock() {
+    KPS.docked = false;
+    const panel = document.getElementById('kp-float');
+    if (!panel) return;
+    document.body.appendChild(panel);
+
+    jQuery('#kp-float').removeClass('kp-docked kp-open');
+    if (KPS.panelPos.x !== null) {
+        jQuery('#kp-float').css({ left: KPS.panelPos.x, top: KPS.panelPos.y, right: 'auto', bottom: 'auto' });
+    } else {
+        jQuery('#kp-float').css({ top: '100px', right: '12px', left: 'auto' });
+    }
+
+    kpCreatePill();
+    kpRenderPanel();
+}
+
+function kpMoveDockToEnd() {
+    if (!KPS.docked) return;
+    const panel = document.getElementById('kp-float');
+    const chat  = document.getElementById('chat');
+    if (!panel || !chat) return;
+    const last = chat.querySelector('.mes:last-child');
+    if (last && last.nextSibling !== panel) {
+        chat.insertBefore(panel, last.nextSibling);
+    }
+}
+
+// ── Sidebar (mass assignment) ─────────────────────────────────────────────────
+function kpCreateSidebar() {
+    jQuery('#kp-settings').remove();
+    jQuery('#extensions_settings2').append(`
     <div id="kp-settings">
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b><span class="kp-star-title">✦</span> KitsunePreset</b>
+          <b>✦ KitsunePreset</b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
-        <div class="inline-drawer-content kp-panel">
-
-          <!-- Текущий контекст -->
-          <div class="kp-context">
-            <div class="kp-ctx-ava" id="kp-ctx-ava">${avatarHtml(info, 36)}</div>
-            <div class="kp-ctx-info">
-              <div class="kp-ctx-name" id="kp-ctx-name">${escHtml(info ? info.name : 'Персонаж не выбран')}</div>
-              <div class="kp-ctx-chat" id="kp-ctx-chat">${escHtml(chatId ? chatId.substring(0,26) : 'Нет чата')}</div>
-            </div>
-            <div class="kp-ctx-tags" id="kp-ctx-tags">
-              ${chatBound ? `<span class="kp-tag kp-tag-chat" title="${escHtml(chatBound)}">чат</span>` : ''}
-              ${charBound ? `<span class="kp-tag kp-tag-char" title="${escHtml(charBound)}">перс</span>` : ''}
-            </div>
+        <div class="inline-drawer-content">
+          <p style="font-size:11px;opacity:.4;text-align:center;font-style:italic;margin:4px 0 10px">
+            Управление — в плавающей плашке
+          </p>
+          <div style="font-size:9.5px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;opacity:.45;margin-bottom:6px">
+            Массовое назначение персонажам
           </div>
-
-          <!-- Опции -->
-          <div class="kp-row">
-            <label class="checkbox_label"><input type="checkbox" id="kp-enabled"    ${s.enabled          ?'checked':''}><span>Включён</span></label>
-            <label class="checkbox_label"><input type="checkbox" id="kp-autoswitch" ${s.autoSwitch       ?'checked':''} title="Авто-применять при смене чата"><span>Авто-смена</span></label>
-            <label class="checkbox_label"><input type="checkbox" id="kp-show-ind"   ${s.showIndicator    ?'checked':''}><span>Индикатор</span></label>
-            <label class="checkbox_label"><input type="checkbox" id="kp-notify"     ${s.showNotifications?'checked':''}><span>Уведомления</span></label>
-          </div>
-
-          <!-- Позиция + Обновить -->
-          <div class="kp-row-inline">
-            <div class="kp-field">
-              <label>Позиция индикатора</label>
-              <select id="kp-indpos" class="text_pole kp-sel">
-                <option value="top-left"     ${cornerVal()==='top-left'    ?'selected':''}>Верх-лево</option>
-                <option value="top-right"    ${cornerVal()==='top-right'   ?'selected':''}>Верх-право</option>
-                <option value="bottom-left"  ${cornerVal()==='bottom-left' ?'selected':''}>Низ-лево</option>
-                <option value="bottom-right" ${cornerVal()==='bottom-right'?'selected':''}>Низ-право</option>
-                <option value="custom"       ${cornerVal()==='custom'      ?'selected':''}>Своя (перетащи)</option>
-              </select>
-            </div>
-            <div class="kp-field kp-field-btn">
-              <label>Пресеты</label>
-              <button id="kp-refresh" class="menu_button kp-btn-sm">Обновить</button>
-            </div>
-          </div>
-
-          <!-- ═══ ДЕФОЛТ ПРЕСЕТ ═══ -->
-          <div class="kp-block kp-block-default">
-            <div class="kp-block-label">
-              <span class="kp-def-icon">⚙</span>
-              Пресет по умолчанию
-              <span class="kp-def-hint" title="Применяется когда нет привязки к чату/персонажу">(для остальных чатов)</span>
-            </div>
-            <div class="kp-default-row">
-              <select id="kp-default-sel" class="text_pole kp-preset-sel">${presetOpts(s.defaultPreset, 'Не задан')}</select>
-              <button id="kp-default-apply" class="menu_button kp-act-btn kp-act-apply" title="Применить сейчас">▶</button>
-            </div>
-            <div class="kp-def-status" id="kp-def-status">
-              ${s.defaultPreset
-                ? `<span class="kp-stag kp-stag-def">⚙ ${escHtml(s.defaultPreset)}</span>`
-                : '<span class="kp-stag-none">Не задан — пресет не меняется при отсутствии привязки</span>'}
-            </div>
-          </div>
-
-          <!-- Привязка для текущего чата/персонажа -->
-          <div class="kp-block">
-            <div class="kp-block-label">Привязать пресет:</div>
-            <select id="kp-preset-sel" class="text_pole kp-preset-sel">${presetOpts(curSel)}</select>
-            <div class="kp-actions">
-              <button id="kp-bind-chat" class="menu_button kp-act-btn ${chatBound?'kp-act-active':''}">К чату</button>
-              <button id="kp-bind-char" class="menu_button kp-act-btn ${charBound?'kp-act-active':''}">К персонажу</button>
-              <button id="kp-unbind"    class="menu_button kp-act-btn kp-act-rm">Снять</button>
-              <button id="kp-apply"     class="menu_button kp-act-btn kp-act-apply">Применить</button>
-            </div>
-            <div class="kp-status" id="kp-status">
-              ${chatBound ? `<span class="kp-stag kp-stag-chat">Чат → ${escHtml(chatBound)}</span>` : ''}
-              ${charBound ? `<span class="kp-stag kp-stag-char">Перс → ${escHtml(charBound)}</span>` : ''}
-              ${!chatBound && !charBound ? '<span class="kp-stag-none">Нет привязок для текущего чата/персонажа</span>' : ''}
-            </div>
-          </div>
-
-          <!-- Браузер всех персонажей -->
-          <div class="kp-block">
-            <div class="kp-block-label kp-list-hdr">
-              <span>Массовое назначение</span>
-              <button id="kp-browse-chars" class="menu_button kp-btn-sm">Все персонажи ▾</button>
-            </div>
-            <div id="kp-char-browser" class="kp-char-browser" style="display:none"></div>
-          </div>
-
-          <!-- Список привязок -->
-          <div class="kp-block kp-block-list">
-            <div class="kp-block-label kp-list-hdr">
-              <span id="kp-bind-cnt">Привязки (${Object.keys(s.presetBindings).length})</span>
-              <button id="kp-clear-all" class="menu_button kp-btn-rm-all">Очистить всё</button>
-            </div>
-            <div id="kp-bindings" class="kp-bindings"></div>
-          </div>
-
+          <input type="text" id="kp-sb-srch" placeholder="🔍 Поиск..."
+            style="width:100%;box-sizing:border-box;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:6px;color:#ddd;font-size:12px;padding:5px 8px;margin-bottom:5px">
+          <div id="kp-sb-list" style="max-height:240px;overflow-y:auto"></div>
+          <button id="kp-sb-clr"
+            style="margin-top:8px;width:100%;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.2);border-radius:6px;color:rgba(252,165,165,.7);font-size:11px;padding:5px;cursor:pointer">
+            🗑 Удалить все привязки
+          </button>
         </div>
       </div>
     </div>`);
 
-    renderList();
-    attachListeners();
-}
+    kpRenderSidebar();
 
-function syncPanel() {
-    const info      = getCurrentChar();
-    const chatId    = getCurrentChatId();
-    const ck  = chatKey(), chk = charKey();
-    const chatBound = (ck  && settings.presetBindings[ck])  || '';
-    const charBound = (chk && settings.presetBindings[chk]) || '';
-    const curSel    = chatBound || charBound || '';
-    const dp        = settings.defaultPreset || '';
-
-    $('#kp-ctx-ava').html(avatarHtml(info, 36));
-    $('#kp-ctx-name').text(info ? info.name : 'Персонаж не выбран');
-    $('#kp-ctx-chat').text(chatId ? chatId.substring(0,26) : 'Нет чата');
-    $('#kp-ctx-tags').html(
-        (chatBound ? `<span class="kp-tag kp-tag-chat" title="${escHtml(chatBound)}">чат</span>` : '') +
-        (charBound ? `<span class="kp-tag kp-tag-char" title="${escHtml(charBound)}">перс</span>` : '')
-    );
-    $('#kp-preset-sel').html(presetOpts(curSel));
-    $('#kp-default-sel').val(dp);
-    $('#kp-def-status').html(dp
-        ? `<span class="kp-stag kp-stag-def">⚙ ${escHtml(dp)}</span>`
-        : '<span class="kp-stag-none">Не задан — пресет не меняется при отсутствии привязки</span>'
-    );
-    $('#kp-bind-chat').toggleClass('kp-act-active', !!chatBound);
-    $('#kp-bind-char').toggleClass('kp-act-active', !!charBound);
-    $('#kp-status').html(
-        (chatBound ? `<span class="kp-stag kp-stag-chat">Чат → ${escHtml(chatBound)}</span>` : '') +
-        (charBound ? `<span class="kp-stag kp-stag-char">Перс → ${escHtml(charBound)}</span>` : '') +
-        (!chatBound && !charBound ? '<span class="kp-stag-none">Нет привязок для текущего чата/персонажа</span>' : '')
-    );
-    $('#kp-bind-cnt').text(`Привязки (${Object.keys(settings.presetBindings).length})`);
-}
-
-function renderList() {
-    const el = $('#kp-bindings').empty();
-    const entries = Object.entries(settings.presetBindings);
-    $('#kp-bind-cnt').text(`Привязки (${entries.length})`);
-    if (!entries.length) { el.html('<div class="kp-empty">Нет привязок</div>'); return; }
-
-    entries.forEach(([key, preset]) => {
-        let info = null, tag = '', tagCls = '';
-        const meta = settings.bindingMeta?.[key];
-
-        if (key.startsWith('char_')) {
-            tag = 'перс'; tagCls = 'kp-tag-char-s';
-            if (meta) { info = { name: meta.name, avatar: meta.avatar }; }
-            else {
-                const id = parseInt(key.replace('char_', ''));
-                const c  = (!isNaN(id) && (window.characters || [])[id]) || null;
-                info = c ? buildCharInfo(c, id) : { name: `Персонаж #${id}`, avatar: null };
-            }
-        } else {
-            tag = 'чат'; tagCls = 'kp-tag-chat-s';
-            info = meta
-                ? { name: meta.charName || meta.name, avatar: meta.avatar }
-                : { name: key.replace('chat_', '').substring(0, 18), avatar: null };
-        }
-
-        el.append(`
-            <div class="kp-bitem">
-              <div class="kp-bi-ava">${avatarHtml(info, 22)}</div>
-              <span class="kp-bi-tag ${tagCls}">${tag}</span>
-              <span class="kp-bi-name" title="${escHtml(key)}">${escHtml(info ? info.name : key)}</span>
-              <span class="kp-bi-arr">→</span>
-              <span class="kp-bi-preset" title="${escHtml(preset)}">${escHtml(preset)}</span>
-              <button class="kp-bi-rm menu_button" data-key="${escHtml(key)}">✕</button>
-            </div>`);
-    });
-
-    el.find('.kp-bi-rm').on('click', function() {
-        const k = $(this).data('key');
-        delete settings.presetBindings[k];
-        if (settings.bindingMeta) delete settings.bindingMeta[k];
-        save(); renderList(); syncPanel(); refreshIndicator();
-        notify('Привязка удалена');
-    });
-}
-
-// ── Браузер персонажей ────────────────────────────────────────────────────────
-function renderCharBrowser() {
-    const container = $('#kp-char-browser');
-    const chars = window.characters || [];
-    if (!chars.length) { container.html('<div class="kp-empty">Персонажи не найдены</div>'); return; }
-
-    let rows = '';
-    chars.forEach((c, i) => {
-        if (!c || !c.name) return;
-        const info  = buildCharInfo(c, i);
-        const key   = `char_${i}`;
-        const bound = settings.presetBindings[key] || '';
-        rows += `
-        <div class="kp-cb-item" data-char-name="${escHtml(c.name.toLowerCase())}">
-          <div class="kp-cb-ava">${avatarHtml(info, 26)}</div>
-          <span class="kp-cb-name" title="${escHtml(c.name)}">${escHtml(c.name)}</span>
-          <select class="text_pole kp-cb-sel" data-char-idx="${i}">${presetOpts(bound)}</select>
-          <button class="menu_button kp-cb-save kp-btn-sm" data-char-idx="${i}">✓</button>
-        </div>`;
-    });
-
-    container.html(`
-        <input type="text" id="kp-cb-search" class="text_pole kp-cb-search" placeholder="🔍 Поиск...">
-        <div class="kp-cb-list" id="kp-cb-list">${rows}</div>`);
-
-    $('#kp-cb-search').on('input', function() {
-        const q = $(this).val().toLowerCase().trim();
-        $('#kp-cb-list .kp-cb-item').each(function() {
-            $(this).toggle(!q || ($(this).data('char-name') || '').includes(q));
+    jQuery('#kp-sb-srch').on('input', function() {
+        const q = jQuery(this).val().toLowerCase();
+        jQuery('#kp-sb-list .kp-sb-row').each(function() {
+            jQuery(this).toggle(!q || (jQuery(this).data('n') || '').includes(q));
         });
     });
 
-    container.find('.kp-cb-save').on('click', function() {
-        const idx  = parseInt($(this).data('char-idx'));
-        const sel  = container.find(`.kp-cb-sel[data-char-idx="${idx}"]`).val();
+    jQuery('#kp-sb-clr').on('click', function() {
+        if (!confirm('Удалить все привязки?')) return;
+        KPS.presetBindings = {}; KPS.bindingMeta = {};
+        kpSave(); kpRenderSidebar(); kpRenderPanel(); kpRefreshPill();
+    });
+}
+
+function kpRenderSidebar() {
+    const chars = window.characters || [];
+    const el = jQuery('#kp-sb-list').empty();
+    if (!chars.length) {
+        el.html('<div style="font-size:11px;opacity:.35;padding:4px">Нет персонажей</div>');
+        return;
+    }
+    chars.forEach((c, i) => {
+        if (!c?.name) return;
+        const info  = kpMkChar(c, i);
+        const key   = `char_${i}`;
+        const bound = KPS.presetBindings[key] || '';
+        const ava   = info.avatar
+            ? `<img src="${info.avatar}" style="width:20px;height:20px;border-radius:50%;object-fit:cover;flex-shrink:0" onerror="this.style.display='none'">`
+            : `<div style="width:20px;height:20px;border-radius:50%;background:rgba(167,139,250,.15);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:rgba(167,139,250,.7);flex-shrink:0">${info.name.charAt(0).toUpperCase()}</div>`;
+        let opts = `<option value="">—</option>`;
+        kpPresets.forEach(p => { opts += `<option value="${kpEsc(p.label)}"${bound===p.label?' selected':''}>${kpEsc(p.label)}</option>`; });
+
+        el.append(`<div class="kp-sb-row" data-n="${kpEsc(c.name.toLowerCase())}"
+            style="display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid rgba(255,255,255,.03)">
+            ${ava}
+            <span style="flex:1;min-width:0;font-size:11px;color:rgba(210,200,245,.75);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                title="${kpEsc(c.name)}">${kpEsc(c.name)}</span>
+            <select data-idx="${i}"
+                style="width:90px;font-size:10px;background:rgba(255,255,255,.05);border:1px solid rgba(167,139,250,.15);border-radius:5px;color:#ddd8ff;padding:2px 4px">${opts}</select>
+            <button class="kp-sb-save" data-idx="${i}"
+                style="background:rgba(167,139,250,.08);border:1px solid rgba(167,139,250,.2);border-radius:5px;color:#c4b5fd;font-size:10px;padding:2px 6px;cursor:pointer">✓</button>
+        </div>`);
+    });
+
+    el.find('.kp-sb-save').on('click', function() {
+        const idx  = parseInt(jQuery(this).data('idx'));
+        const sel  = el.find(`select[data-idx="${idx}"]`).val();
         const key  = `char_${idx}`;
         const c    = (window.characters || [])[idx];
-        const info = c ? buildCharInfo(c, idx) : null;
-
+        const info = c ? kpMkChar(c, idx) : null;
         if (sel) {
-            settings.presetBindings[key] = sel;
-            if (!settings.bindingMeta) settings.bindingMeta = {};
-            settings.bindingMeta[key] = { name: info?.name || `#${idx}`, avatar: info?.avatar || null };
+            KPS.presetBindings[key] = sel;
+            KPS.bindingMeta[key] = { name: info?.name || `#${idx}`, avatar: info?.avatar || null };
         } else {
-            delete settings.presetBindings[key];
-            if (settings.bindingMeta) delete settings.bindingMeta[key];
+            delete KPS.presetBindings[key];
+            delete KPS.bindingMeta[key];
         }
-        save(); renderList(); syncPanel(); refreshIndicator();
-        notify(sel ? `${c?.name || '#'+idx} → ${sel}` : 'Привязка снята');
-        const btn = $(this);
-        btn.addClass('kp-cb-saved');
-        setTimeout(() => btn.removeClass('kp-cb-saved'), 1200);
+        kpSave(); kpRenderPanel(); kpRefreshPill();
+        const btn = jQuery(this);
+        btn.css({ background:'rgba(52,211,153,.12)', borderColor:'rgba(52,211,153,.3)', color:'#6ee7b7' });
+        setTimeout(() => btn.css({ background:'', borderColor:'', color:'' }), 1200);
     });
 }
 
-// ── Слушатели панели ──────────────────────────────────────────────────────────
-function attachListeners() {
-    $('#kp-enabled').on('change',    function() { settings.enabled           = this.checked; save(); });
-    $('#kp-autoswitch').on('change', function() { settings.autoSwitch        = this.checked; save(); });
-    $('#kp-notify').on('change',     function() { settings.showNotifications  = this.checked; save(); });
-    $('#kp-show-ind').on('change',   function() {
-        settings.showIndicator = this.checked; save();
-        settings.showIndicator ? (createIndicator(), refreshIndicator()) : $('#kp-indicator').remove();
-    });
-    $('#kp-indpos').on('change', function() {
-        const v = $(this).val();
-        if (v !== 'custom') { settings.indicatorPosition = { x:null, y:null, corner:v }; save(); createIndicator(); refreshIndicator(); }
-    });
-    $('#kp-refresh').on('click', function() {
-        availablePresets = loadPresetsFromUI();
-        syncPanel();
-        startPresetObserver();
-        notify(`Загружено: ${availablePresets.length} пресетов`);
-    });
-
-    // Дефолт пресет
-    $('#kp-default-sel').on('change', function() {
-        settings.defaultPreset = $(this).val();
-        save(); syncPanel(); refreshIndicator();
-        notify(settings.defaultPreset ? '⚙ Дефолт: ' + settings.defaultPreset : 'Дефолт сброшен');
-    });
-    $('#kp-default-apply').on('click', function() {
-        const v = $('#kp-default-sel').val() || settings.defaultPreset;
-        if (v) { switchWithRetry(v); notify('Применён: ' + v); }
-        else notify('Дефолт пресет не задан');
-    });
-
-    // Привязки
-    $('#kp-bind-chat').on('click', function() {
-        const v = $('#kp-preset-sel').val(), k = chatKey();
-        if (!k) { notify('Сначала откройте чат'); return; }
-        if (v) { settings.presetBindings[k] = v; saveBindingMeta(k); }
-        else   { delete settings.presetBindings[k]; if (settings.bindingMeta) delete settings.bindingMeta[k]; }
-        save(); syncPanel(); renderList(); refreshIndicator();
-        notify(v ? 'К чату: ' + v : 'Привязка к чату снята');
-    });
-    $('#kp-bind-char').on('click', function() {
-        const v = $('#kp-preset-sel').val(), k = charKey();
-        if (!k) { notify('Персонаж не определён'); return; }
-        if (v) { settings.presetBindings[k] = v; saveBindingMeta(k); }
-        else   { delete settings.presetBindings[k]; if (settings.bindingMeta) delete settings.bindingMeta[k]; }
-        save(); syncPanel(); renderList(); refreshIndicator();
-        notify(v ? 'К персонажу: ' + v : 'Привязка снята');
-    });
-    $('#kp-unbind').on('click', function() {
-        [chatKey(), charKey()].filter(Boolean).forEach(k => {
-            delete settings.presetBindings[k];
-            if (settings.bindingMeta) delete settings.bindingMeta[k];
-        });
-        save(); syncPanel(); renderList(); refreshIndicator();
-        notify('Привязки сняты');
-    });
-    $('#kp-apply').on('click', function() {
-        const v = $('#kp-preset-sel').val();
-        if (v) { switchWithRetry(v); notify('Применён: ' + v); }
-        else notify('Выберите пресет');
-    });
-    $('#kp-clear-all').on('click', function() {
-        if (!confirm('Удалить все привязки?')) return;
-        settings.presetBindings = {}; settings.bindingMeta = {};
-        save(); syncPanel(); renderList(); refreshIndicator();
-        notify('Все привязки удалены');
-    });
-    $('#kp-browse-chars').on('click', function() {
-        charBrowserOpen = !charBrowserOpen;
-        if (charBrowserOpen) { renderCharBrowser(); $('#kp-char-browser').slideDown(200); $(this).text('Все персонажи ▴'); }
-        else                 { $('#kp-char-browser').slideUp(200); $(this).text('Все персонажи ▾'); }
+// ── Draggable ─────────────────────────────────────────────────────────────────
+function kpDraggable(handle, moveEl, onEnd) {
+    const target = moveEl || handle;
+    let ox, oy, ex, ey, moved = false;
+    jQuery(handle).css('cursor','grab').on('mousedown', function(e) {
+        if (e.button !== 0) return;
+        moved = false;
+        const r = target.getBoundingClientRect();
+        ox = e.clientX; oy = e.clientY; ex = r.left; ey = r.top;
+        jQuery(document)
+            .on('mousemove.kpd', function(ev) {
+                const dx = ev.clientX - ox, dy = ev.clientY - oy;
+                if (!moved && (Math.abs(dx)>3 || Math.abs(dy)>3)) {
+                    moved = true; jQuery(handle).css('cursor','grabbing');
+                }
+                if (!moved) return;
+                jQuery(target).css({
+                    left:   Math.max(0, Math.min(window.innerWidth  - target.offsetWidth,  ex+dx)),
+                    top:    Math.max(0, Math.min(window.innerHeight - target.offsetHeight, ey+dy)),
+                    right: 'auto', bottom: 'auto',
+                });
+            })
+            .on('mouseup.kpd', function() {
+                jQuery(document).off('mousemove.kpd mouseup.kpd');
+                jQuery(handle).css('cursor','grab');
+                if (moved && onEnd) { const r2 = target.getBoundingClientRect(); onEnd({ x:r2.left, y:r2.top }); }
+                jQuery(handle).data('kpdrag', moved);
+                moved = false;
+            });
+        e.preventDefault();
     });
 }
 
-// ── Быстрое меню ──────────────────────────────────────────────────────────────
-function showQuickMenu() {
-    $(document).off('click.kpclose');
-    $('.kp-quick-menu').remove();
-    const cur  = resolvePreset() || '';
-    const info = getCurrentChar();
+// ── Events ────────────────────────────────────────────────────────────────────
+function kpRegisterEvents() {
+    const es = window.eventSource;
+    if (!es) { kpLog('⚠ no eventSource'); return; }
+    const et = window.event_types || {};
 
-    const items = availablePresets.map(p => {
-        const a = cur === p.label;
-        return `<div class="kp-qi${a?' kp-qi-on':''}" data-p="${escHtml(p.label)}">
-            <span class="kp-qi-n">${escHtml(p.label)}</span>${a?'<span class="kp-qi-chk">✓</span>':''}
-        </div>`;
-    }).join('');
+    let _debTimer = null;
+    const onChatChange = () => {
+        clearTimeout(_debTimer);
+        _debTimer = setTimeout(async () => {
+            // Skip if WE just applied (ST fires events in reaction)
+            if (Date.now() - kpLastApply < 2000) {
+                kpRefreshPill(); kpUpdatePanel(); kpMoveDockToEnd();
+                return;
+            }
+            await new Promise(r => setTimeout(r, 700));
+            if (!kpGetChar()) await new Promise(r => setTimeout(r, 500));
 
-    $('body').append(`
-        <div class="kp-quick-menu">
-          <div class="kp-qm-hdr">
-            ${info && info.avatar ? `<img class="kp-qm-ava" src="${info.avatar}" onerror="this.style.display='none'">` : ''}
-            <span>${escHtml(info ? info.name : 'Выбор пресета')}</span>
-            <button class="kp-qm-x">✕</button>
-          </div>
-          <div class="kp-qm-list">
-            <div class="kp-qi${!cur?' kp-qi-on':''}" data-p=""><span class="kp-qi-n">— По умолчанию —</span>${!cur?'<span class="kp-qi-chk">✓</span>':''}</div>
-            ${items}
-          </div>
-          <div class="kp-qm-ftr">
-            <button class="kp-qf-chat menu_button">К чату</button>
-            <button class="kp-qf-char menu_button">К персонажу</button>
-            <button class="kp-qf-apply menu_button kp-qf-blue">Применить</button>
-          </div>
-        </div>`);
+            kpRefreshPill(); kpUpdatePanel();
+            if (KPS.docked) { await new Promise(r => setTimeout(r, 200)); kpMoveDockToEnd(); }
 
-    let sel = cur;
-    $('.kp-qi').on('click', function() {
-        sel = $(this).data('p');
-        $('.kp-qi').removeClass('kp-qi-on').find('.kp-qi-chk').remove();
-        $(this).addClass('kp-qi-on').append('<span class="kp-qi-chk">✓</span>');
-    });
-    $('.kp-qf-chat').on('click',  () => bindAndClose(sel, 'chat'));
-    $('.kp-qf-char').on('click',  () => bindAndClose(sel, 'char'));
-    $('.kp-qf-apply').on('click', () => {
-        if (sel) { switchWithRetry(sel); notify('Применён: ' + sel); }
-        $('.kp-quick-menu').remove();
-    });
-    $('.kp-qm-x').on('click', () => $('.kp-quick-menu').remove());
-    setTimeout(() => $(document).one('click.kpclose', e => {
-        if (!$(e.target).closest('.kp-quick-menu').length) $('.kp-quick-menu').remove();
-    }), 200);
-}
+            if (!KPS.enabled || !KPS.autoSwitch) return;
+            const need = kpResolve();
+            if (!need) { kpLog('no preset for this chat/char'); return; }
 
-function bindAndClose(preset, type) {
-    const k = type === 'chat' ? chatKey() : charKey();
-    if (!k) { notify(type === 'chat' ? 'Откройте чат' : 'Персонаж не определён'); $('.kp-quick-menu').remove(); return; }
-    if (preset) { settings.presetBindings[k] = preset; saveBindingMeta(k); }
-    else { delete settings.presetBindings[k]; if (settings.bindingMeta) delete settings.bindingMeta[k]; }
-    save(); syncPanel(); renderList(); refreshIndicator();
-    notify(preset ? (type === 'chat' ? 'К чату: ' : 'К персонажу: ') + preset : 'Привязка снята');
-    $('.kp-quick-menu').remove();
-}
-
-// ── События ST ────────────────────────────────────────────────────────────────
-function registerEvents() {
-    const es = getES();
-    if (!es) { log('⚠ eventSource не найден'); return; }
-    const et = getET();
-
-    const onChange = async () => {
-        // Первая пауза — даём ST начать загрузку
-        await new Promise(r => setTimeout(r, 800));
-
-        // Если персонаж ещё не виден — пробуем ещё раз
-        if (!getCurrentChar()) await new Promise(r => setTimeout(r, 600));
-
-        refreshAll();
-
-        if (!settings.enabled || !settings.autoSwitch) return;
-
-        const needed = resolvePreset();
-        if (!needed) { log('Нет привязки и дефолта — пресет не меняем'); return; }
-
-        // Пауза чтобы ST закончил грузить свои настройки для чата
-        await new Promise(r => setTimeout(r, 500));
-
-        // Определяем откуда взялся нужный пресет для уведомления
-        const ck  = chatKey(), chk = charKey();
-        const src = (ck  && settings.presetBindings[ck])  ? 'чат'  :
-                    (chk && settings.presetBindings[chk]) ? 'перс' : 'дефолт';
-
-        switchWithRetry(needed);
-        notify(`Авто (${src}): ${needed}`);
+            await new Promise(r => setTimeout(r, 400));
+            const src = kpBindingType() || 'default';
+            kpApplyRetry(need);
+            kpNotify({ chat:'💬', char:'👤', default:'⚙' }[src] + ' ' + need);
+        }, 350); // debounce: merge CHAT_CHANGED + CHARACTER_SELECTED into one call
     };
 
-    const events = [
-        et.CHAT_CHANGED       || 'chatChanged',
-        et.CHARACTER_SELECTED || 'characterSelected',
-        et.CHAT_LOADED        || 'chatLoaded',
-        'chat_changed', 'character_selected', 'chat_loaded',
-    ];
-    [...new Set(events)].forEach(ev => { try { es.on(ev, onChange); } catch(e) {} });
-    log('Слушаем:', [...new Set(events)]);
+    // Subscribe to primary events only (no duplicates)
+    [et.CHAT_CHANGED || 'chatChanged', et.CHARACTER_SELECTED || 'characterSelected']
+        .forEach(ev => { try { es.on(ev, onChatChange); } catch(e) {} });
+
+    // Message received → move dock to end
+    let _msgTimer = null;
+    try {
+        es.on(et.MESSAGE_RECEIVED || 'messageReceived', () => {
+            clearTimeout(_msgTimer);
+            _msgTimer = setTimeout(() => kpMoveDockToEnd(), 200);
+        });
+    } catch(e) {}
+
+    kpLog('events registered');
 }
 
-function notify(msg) {
-    if (!settings.showNotifications) return;
-    if (typeof toastr !== 'undefined') toastr.info(msg, '✦ KitsunePreset');
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function kpEsc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function save() {
-    getExt()[MODULE_NAME] = settings;
-    getSave()();
+function kpToast(msg) {
+    if (typeof toastr !== 'undefined') toastr.info(msg, '✦ KP', { timeOut: 2000 });
 }
 
-jQuery(async () => { await init(); });
+// ── Boot ──────────────────────────────────────────────────────────────────────
+// ── Boot ─────────────────────────────────────────────────────────────────────
+// Legacy boot (non-module ST): jQuery ready fires after script execution
+jQuery(async () => { await kpInit(); });
+
+// ES Module export (ST >= 1.11 calling init() explicitly)
+export async function init() { await kpInit(); }
+export async function onEnable() { await kpInit(); }
+export async function onDisable() {
+    jQuery('#kp-pill, #kp-float, #kp-settings').remove();
+    if (kpObs) { kpObs.disconnect(); kpObs = null; }
+    window._kpInitDone = false;
+}
