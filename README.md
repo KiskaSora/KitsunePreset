@@ -1,6 +1,6 @@
 <div align="center">
 
-![KitsunePreset Banner](banner.svg)
+![KitsunePreset Banner]([banner.svg](https://github.com/KiskaSora/KitsunePreset/blob/main/banner.svg))
 
 </div>
 
