@@ -391,10 +391,13 @@ function kpCreatePill() {
 
 function kpRefreshPill() {
     if (KPS.docked) { jQuery('#kp-pill').hide(); return; }
-    const name = kpResolve() || kpGetActive();
-    if (!name) { jQuery('#kp-pill').hide(); return; }
 
+    const name = kpResolve() || kpGetActive();
     const info  = kpGetChar();
+
+    // Always show pill when there is a character — hide only on bare home screen
+    if (!name && !info) { jQuery('#kp-pill').hide(); return; }
+
     const isDef = !kpBindingType();
 
     kpApplyAccent();
@@ -409,7 +412,7 @@ function kpRefreshPill() {
     }
 
     jQuery('#kp-pill-ico').text(isDef ? '⚙' : '✦');
-    jQuery('#kp-pill-txt').text(name);
+    jQuery('#kp-pill-txt').text(name || '—');
     jQuery('#kp-pill').show();
 }
 
@@ -755,16 +758,15 @@ function kpClosePanel() {
 // ── Dock ──────────────────────────────────────────────────────────────────────
 function kpDock() {
     KPS.docked = true;
+    kpPanelOpen = false;   // reset so undock→pill click works
     const panel = document.getElementById('kp-float');
     if (!panel) return;
 
-    // Try containers in priority order — some ST mobile builds hide #chat overflow
-    const container = document.getElementById('chat')
-                   || document.getElementById('sheld')
-                   || document.body;
-    const last = container.querySelector('.mes:last-child');
-    if (last) container.insertBefore(panel, last.nextSibling);
-    else container.appendChild(panel);
+    // Append to end of #chat — appendChild always puts it AFTER all messages
+    const chat = document.getElementById('chat')
+              || document.getElementById('sheld')
+              || document.body;
+    chat.appendChild(panel);
 
     jQuery('#kp-float')
         .removeClass('kp-open')
@@ -777,11 +779,12 @@ function kpDock() {
 
 function kpUndock() {
     KPS.docked = false;
+    kpPanelOpen = false;   // reset so pill click re-opens correctly
     const panel = document.getElementById('kp-float');
     if (!panel) return;
     document.body.appendChild(panel);
 
-    jQuery('#kp-float').removeClass('kp-docked kp-open');
+    jQuery('#kp-float').removeClass('kp-docked kp-open').hide();
     if (KPS.panelPos.x !== null) {
         jQuery('#kp-float').css({ left: KPS.panelPos.x, top: KPS.panelPos.y, right: 'auto', bottom: 'auto' });
     } else {
@@ -795,12 +798,11 @@ function kpUndock() {
 function kpMoveDockToEnd() {
     if (!KPS.docked) return;
     const panel = document.getElementById('kp-float');
-    const chat  = document.getElementById('chat');
+    const chat  = document.getElementById('chat')
+               || document.getElementById('sheld');
     if (!panel || !chat) return;
-    const last = chat.querySelector('.mes:last-child');
-    if (last && last.nextSibling !== panel) {
-        chat.insertBefore(panel, last.nextSibling);
-    }
+    // appendChild always moves panel to end — safe even if already last
+    if (chat.lastElementChild !== panel) chat.appendChild(panel);
 }
 
 // ── Sidebar (mass assignment) ─────────────────────────────────────────────────
@@ -901,6 +903,7 @@ function kpCreateSidebar() {
     // Restore floating window to default position
     jQuery('#kp-sb-restore').on('click', function() {
         KPS.docked    = false;
+        kpPanelOpen   = false;
         KPS.panelPos  = { x: null, y: null };
         KPS.pillPos   = { corner: 'top-right', x: null, y: null };
         kpSave();
