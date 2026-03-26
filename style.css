@@ -396,36 +396,13 @@
     #kp-pill-ava  { width: 28px; height: 28px; }
     .kp-pill-fb   { width: 28px; height: 28px; font-size: 13px; }
 
-    /* ── Float panel: bottom sheet on mobile ────────── */
+    /* ── Float panel: clamp to viewport on mobile ───── */
     #kp-float.kp-open {
-        position: fixed !important;
-        left: 0 !important; right: 0 !important;
-        bottom: 0 !important; top: auto !important;
-        width: 100% !important;
-        max-width: 100% !important;
-        border-radius: 16px 16px 0 0 !important;
-        animation: kp-in-mobile .22s cubic-bezier(.34,1.2,.64,1) both !important;
-        max-height: 92dvh;
+        width: calc(100vw - 16px) !important;
+        max-width: 340px !important;
+        max-height: 85dvh;
         overflow-y: auto;
     }
-    @keyframes kp-in-mobile {
-        from { opacity: 0; transform: translateY(30px); }
-        to   { opacity: 1; transform: translateY(0); }
-    }
-
-    /* Drag handle bar at top of sheet */
-    .kp-hdr::before {
-        content: '';
-        display: block;
-        position: absolute;
-        top: 6px; left: 50%;
-        transform: translateX(-50%);
-        width: 36px; height: 4px;
-        border-radius: 2px;
-        background: rgba(255,255,255,.18);
-        z-index: 10;
-    }
-    .kp-hdr { height: 90px; }
 
     /* Larger tap targets for buttons */
     .kp-bb    { padding: 10px 5px; font-size: 12px; }
