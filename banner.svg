@@ -58,34 +58,6 @@
     <circle cx="40" cy="190" r="1.5"/><circle cx="60" cy="190" r="1.5"/>
   </g>
 
-  <!-- Fox icon (stylized kitsune) -->
-  <g transform="translate(62, 100)" filter="url(#softglow)">
-    <!-- Fox body/head -->
-    <ellipse cx="0" cy="8" rx="22" ry="18" fill="rgba(167,139,250,0.08)" stroke="rgba(167,139,250,0.3)" stroke-width="1"/>
-    <!-- Ears -->
-    <polygon points="-14,-8 -22,-26 -4,-12" fill="rgba(167,139,250,0.5)" stroke="rgba(167,139,250,0.7)" stroke-width="1" stroke-linejoin="round"/>
-    <polygon points="14,-8 22,-26 4,-12" fill="rgba(167,139,250,0.5)" stroke="rgba(167,139,250,0.7)" stroke-width="1" stroke-linejoin="round"/>
-    <!-- Inner ears -->
-    <polygon points="-13,-10 -19,-23 -5,-13" fill="rgba(192,132,252,0.4)"/>
-    <polygon points="13,-10 19,-23 5,-13" fill="rgba(192,132,252,0.4)"/>
-    <!-- Face -->
-    <ellipse cx="0" cy="6" rx="16" ry="14" fill="rgba(167,139,250,0.12)" stroke="rgba(167,139,250,0.35)" stroke-width="0.8"/>
-    <!-- Eyes -->
-    <ellipse cx="-6" cy="3" rx="3" ry="3.5" fill="rgba(192,132,252,0.9)" filter="url(#glow)"/>
-    <ellipse cx="6" cy="3" rx="3" ry="3.5" fill="rgba(192,132,252,0.9)" filter="url(#glow)"/>
-    <ellipse cx="-6" cy="3.5" rx="1.5" ry="2" fill="#1a1535"/>
-    <ellipse cx="6" cy="3.5" rx="1.5" ry="2" fill="#1a1535"/>
-    <!-- Shine -->
-    <circle cx="-5" cy="2.5" r="0.8" fill="white" opacity="0.8"/>
-    <circle cx="7" cy="2.5" r="0.8" fill="white" opacity="0.8"/>
-    <!-- Nose -->
-    <ellipse cx="0" cy="9" rx="2" ry="1.2" fill="rgba(192,132,252,0.6)"/>
-    <!-- Tails (multiple - kitsune) -->
-    <path d="M-10,20 Q-30,35 -24,50 Q-15,42 -8,32" fill="none" stroke="rgba(167,139,250,0.4)" stroke-width="3" stroke-linecap="round"/>
-    <path d="M0,22 Q-8,38 -2,52 Q6,44 4,30" fill="none" stroke="rgba(167,139,250,0.35)" stroke-width="3" stroke-linecap="round"/>
-    <path d="M10,20 Q24,36 18,50 Q8,43 6,32" fill="none" stroke="rgba(167,139,250,0.4)" stroke-width="3" stroke-linecap="round"/>
-  </g>
-
   <!-- ✦ sparkle -->
   <text x="130" y="88" font-family="serif" font-size="18" fill="#a78bfa" opacity="0.7" filter="url(#glow)">✦</text>
 
