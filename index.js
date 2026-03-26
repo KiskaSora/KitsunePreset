@@ -17,6 +17,7 @@ const KP_DEFAULTS = {
     panelPos:       { x: null, y: null },
     docked:         false,
     useThemeColor:  false,
+    pillMini:       false,
 };
 
 let KPS           = {};    // live settings reference
@@ -359,6 +360,7 @@ function kpCreatePill() {
                 <div id="kp-pill-ava"></div>
                 <span id="kp-pill-ico">✦</span>
                 <span id="kp-pill-txt">—</span>
+                <button id="kp-pill-min" title="Свернуть / развернуть">◀</button>
             </div>
         </div>`);
 
@@ -366,6 +368,19 @@ function kpCreatePill() {
         KPS.pillPos = { x: Math.round(pos.x), y: Math.round(pos.y), corner: null };
         kpSave();
     });
+
+    jQuery('#kp-pill-min').on('click', function(e) {
+        e.stopPropagation();
+        const mini = jQuery('#kp-pill').toggleClass('kp-mini').hasClass('kp-mini');
+        jQuery(this).text(mini ? '▶' : '◀');
+        KPS.pillMini = mini;
+        kpSave();
+    });
+    // Restore mini state
+    if (KPS.pillMini) {
+        jQuery('#kp-pill').addClass('kp-mini');
+        jQuery('#kp-pill-min').text('▶');
+    }
 
     jQuery('#kp-pill').on('click', function() {
         if (!jQuery(this).data('kpdrag')) kpTogglePanel();
@@ -700,7 +715,7 @@ function kpOpenPanel() {
     kpPanelOpen = true;
 
     setTimeout(() => {
-        jQuery(document).one('mousedown.kpout', e => {
+        jQuery(document).one('mousedown.kpout touchstart.kpout', e => {
             if (!jQuery(e.target).closest('#kp-float,#kp-pill').length) kpClosePanel();
         });
     }, 50);
@@ -709,7 +724,7 @@ function kpOpenPanel() {
 function kpClosePanel() {
     if (KPS.docked) return;
     jQuery('#kp-float').removeClass('kp-open');
-    jQuery(document).off('mousedown.kpout');
+    jQuery(document).off('mousedown.kpout touchstart.kpout');
     kpPanelOpen = false;
 }
 
@@ -893,33 +908,51 @@ function kpCreateSidebar() {
 function kpDraggable(handle, moveEl, onEnd) {
     const target = moveEl || handle;
     let ox, oy, ex, ey, moved = false;
-    jQuery(handle).css('cursor','grab').on('mousedown', function(e) {
-        if (e.button !== 0) return;
+
+    function startDrag(clientX, clientY) {
         moved = false;
         const r = target.getBoundingClientRect();
-        ox = e.clientX; oy = e.clientY; ex = r.left; ey = r.top;
+        ox = clientX; oy = clientY; ex = r.left; ey = r.top;
+    }
+    function moveDrag(clientX, clientY) {
+        const dx = clientX - ox, dy = clientY - oy;
+        if (!moved && (Math.abs(dx) > 4 || Math.abs(dy) > 4)) moved = true;
+        if (!moved) return;
+        jQuery(target).css({
+            left:   Math.max(0, Math.min(window.innerWidth  - target.offsetWidth,  ex + dx)),
+            top:    Math.max(0, Math.min(window.innerHeight - target.offsetHeight, ey + dy)),
+            right: 'auto', bottom: 'auto',
+        });
+    }
+    function endDrag() {
+        if (moved && onEnd) { const r2 = target.getBoundingClientRect(); onEnd({ x: r2.left, y: r2.top }); }
+        jQuery(handle).data('kpdrag', moved);
+        moved = false;
+    }
+
+    // Mouse
+    jQuery(handle).css('cursor', 'grab').on('mousedown', function(e) {
+        if (e.button !== 0) return;
+        startDrag(e.clientX, e.clientY);
         jQuery(document)
-            .on('mousemove.kpd', function(ev) {
-                const dx = ev.clientX - ox, dy = ev.clientY - oy;
-                if (!moved && (Math.abs(dx)>3 || Math.abs(dy)>3)) {
-                    moved = true; jQuery(handle).css('cursor','grabbing');
-                }
-                if (!moved) return;
-                jQuery(target).css({
-                    left:   Math.max(0, Math.min(window.innerWidth  - target.offsetWidth,  ex+dx)),
-                    top:    Math.max(0, Math.min(window.innerHeight - target.offsetHeight, ey+dy)),
-                    right: 'auto', bottom: 'auto',
-                });
-            })
-            .on('mouseup.kpd', function() {
-                jQuery(document).off('mousemove.kpd mouseup.kpd');
-                jQuery(handle).css('cursor','grab');
-                if (moved && onEnd) { const r2 = target.getBoundingClientRect(); onEnd({ x:r2.left, y:r2.top }); }
-                jQuery(handle).data('kpdrag', moved);
-                moved = false;
-            });
+            .on('mousemove.kpd', ev => { moveDrag(ev.clientX, ev.clientY); jQuery(handle).css('cursor', moved ? 'grabbing' : 'grab'); })
+            .on('mouseup.kpd',   ()  => { jQuery(document).off('mousemove.kpd mouseup.kpd'); jQuery(handle).css('cursor','grab'); endDrag(); });
         e.preventDefault();
     });
+
+    // Touch
+    handle.addEventListener('touchstart', function(e) {
+        const t = e.touches[0];
+        startDrag(t.clientX, t.clientY);
+    }, { passive: true });
+    handle.addEventListener('touchmove', function(e) {
+        const t = e.touches[0];
+        moveDrag(t.clientX, t.clientY);
+        if (moved) e.preventDefault(); // block scroll only when actually dragging
+    }, { passive: false });
+    handle.addEventListener('touchend', function() {
+        endDrag();
+    }, { passive: true });
 }
 
 // ── Events ────────────────────────────────────────────────────────────────────
